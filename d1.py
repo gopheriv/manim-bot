@@ -20,7 +20,6 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # In-memory fallback when D1 is disabled (local SQLite for session-only cache)
-_local_cache: dict[str, dict] = {}
 _local_cache_path = Path(__file__).parent / ".local_cache.db"
 _cf_available = False
 
@@ -131,6 +130,7 @@ def _cf_query(sql: str, params: list | None = None) -> Any:
         errors = data.get("errors", [])
         raise RuntimeError(f"D1 query failed: {errors}")
 
+    # D1 API returns result as list of row dicts directly
     return data.get("result", [])
 
 
@@ -138,16 +138,14 @@ async def check_cache(chat_id: int, prompt: str) -> str | None:
     """Check if we have a cached telegram_file_id for this exact prompt."""
     try:
         if _cf_available:
-            result = await asyncio.to_thread(
+            rows = await asyncio.to_thread(
                 _cf_query,
                 "SELECT telegram_file_id FROM render_history WHERE chat_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
                 [chat_id, prompt],
             )
-            if result and len(result) > 0:
-                rows = result[0].get("results", [])
-                if rows and rows[0].get("telegram_file_id"):
-                    logger.info(f"Cache HIT for chat_id={chat_id}")
-                    return rows[0]["telegram_file_id"]
+            if rows and rows[0].get("telegram_file_id"):
+                logger.info(f"Cache HIT for chat_id={chat_id}")
+                return rows[0]["telegram_file_id"]
         else:
             # Local SQLite fallback
             await asyncio.to_thread(

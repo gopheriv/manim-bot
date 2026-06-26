@@ -1,38 +1,39 @@
-# Secrets
+# Environment & secrets
 .env
 .env.*
 !.env.example
-deploy/.env.production
 
 # Python
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 *.egg-info/
-*.egg
 dist/
 build/
-
-# Virtual environment
-venv/
 .venv/
-
-# IDE
-.idea/
-.vscode/
-*.swp
+venv/
 
 # Runtime data
-data/*.db
-logs/*.log
+data/
+media/
+logs/
 tmp/
-temp_frames/
+*.db
+*.sqlite
 
-# Local D1 fallback
-.local_cache.db
-
-# User settings (contains personal preferences)
-user_settings.json
+# IDE
+.vscode/
+.idea/
+*.swp
 
 # OS
-.DS_Store
 Thumbs.db
+.DS_Store
+
+# Guides & reports (local-only markdown)
+*_GUIDE.md
+*_REPORT.md
+*_COMPARISON.md
+*_FIX.md
+*_DISCUSSION.md
+TIMEOUT_ANALYSIS_*.md

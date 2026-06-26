@@ -3,9 +3,11 @@ timeout, process-tree cleanup, heavy scene detection,
 memory-guarded rendering, and LLM-friendly diagnostics."""
 
 import asyncio
+import gc
 import logging
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -37,9 +39,9 @@ def _estimate_scene_weight(code: str) -> SceneWeight:
     """Analyze Manim code to estimate render weight and suggest mitigations.
 
     Thresholds tuned for i5-1155G7 8GB RAM:
-    - score < 30: light — no mitigation needed
-    - score 30-60: medium — quality downgrade
-    - score > 60: heavy — aggressive simplification
+    - score < 20: light — no mitigation needed
+    - score 20-40: medium — quality downgrade
+    - score >= 40: heavy — aggressive simplification + fps reduction
     """
     score = 0
     mitigations: list[str] = []
@@ -59,8 +61,8 @@ def _estimate_scene_weight(code: str) -> SceneWeight:
 
     # Scoring
     score += updater_count * 8       # Updaters run every frame — most expensive
-    score += traced_path_count * 6   # TracedPath accumulates points over time
-    score += surface_count * 25      # Surface rendering is extremely heavy
+    score += traced_path_count * 8   # TracedPath accumulates points over time (raised from 6)
+    score += surface_count * 30      # Surface rendering is extremely heavy (raised from 25)
     score += threed_count * 12       # 3D adds projection math per frame
     score += play_count * 2          # Each self.play adds render work
     score += lagged_count * 4        # LaggedStart multiplies animations
@@ -69,14 +71,14 @@ def _estimate_scene_weight(code: str) -> SceneWeight:
     score += transform_count * 3     # Morphing adds intermediate frames
     score += max(0, estimated_frames - 200)  # Penalize >200 frames
 
-    if score > 60:
+    if score >= 40:
         mitigations = [
             f"HEAVY scene (score {score}/100): auto-downgrading to -ql 480p",
-            "Reducing Manim internal frame rate",
+            "Reducing Manim internal frame rate to 15 fps",
             "Disabling caching to prevent memory buildup",
             "Setting process to BELOW_NORMAL priority",
         ]
-    elif score > 30:
+    elif score > 20:
         mitigations = [
             f"MEDIUM scene (score {score}/100): keeping user quality",
         ]
@@ -85,7 +87,7 @@ def _estimate_scene_weight(code: str) -> SceneWeight:
 
     return SceneWeight(
         score=score,
-        is_heavy=score > 60,
+        is_heavy=score >= 40,
         mitigations=mitigations,
     )
 
@@ -156,7 +158,6 @@ async def render(
         disable_cache = True
 
         # Force garbage collection before heavy render
-        import gc
         gc.collect()
         mem_after = psutil.virtual_memory()
         logger.info(f"GC collected: RAM {mem.percent:.0f}% → {mem_after.percent:.0f}%")
@@ -181,6 +182,9 @@ async def render(
     if disable_cache:
         cmd_args.append("--disable_caching")
         logger.info("Caching disabled for heavy scene (prevents memory buildup)")
+    if weight.is_heavy:
+        cmd_args.extend(["--fps", "15"])
+        logger.info("FPS reduced to 15 for heavy scene (lowers frame count and RAM pressure)")
 
     cmd_args.extend([
         "--media_dir", str(RENDER_DIR / "media"),
@@ -230,6 +234,12 @@ async def render(
                     f"Render killed: system RAM hit {mem.percent:.0f}% "
                     f"({mem.available / 1024**3:.1f} GB free). Simplify the scene."
                 )
+                # Let memory settle before the next render attempt
+                time.sleep(5)
+                gc.collect()
+                gc.collect()  # second pass to catch resurrected refs
+                mem_after = psutil.virtual_memory()
+                logger.info(f"Post-kill GC: RAM {mem.percent:.0f}% → {mem_after.percent:.0f}%")
                 return None
 
             # Read a line from stderr (progress output)

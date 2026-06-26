@@ -4,6 +4,7 @@ Qwen 3.6 Plus or Claude Opus 4.8 for chat, vision, and self-healing."""
 import base64
 import logging
 import re
+from typing import Any
 
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
@@ -11,6 +12,7 @@ from anthropic import AsyncAnthropic
 from config import (
     DASHSCOPE_API_KEY,
     CHAT_MODEL,
+    LLM_BASE_URL,
     GPT_MODEL,
     GPT_BASE_URL,
     GPT_API_KEY,
@@ -33,11 +35,11 @@ logger = logging.getLogger(__name__)
 # Runtime-overridable provider (default from .env)
 _active_provider = LLM_PROVIDER
 
-# Qwen 3.7 Max client for Manim code generation
+# Qwen 3.7 Max client for Manim code generation (DashScope)
 gpt_coding_client = AsyncOpenAI(
     api_key=GPT_API_KEY,
     base_url=GPT_BASE_URL,
-    timeout=600,  # 10 min — Qwen 3.7 Max with long system prompts is slow
+    timeout=300,  # 5 min — Qwen 3.7 Max can be slow
     max_retries=0,
 )
 
@@ -56,7 +58,7 @@ claude_client = AsyncAnthropic(
 )
 
 
-def _strip_code_fences(code: str) -> str:
+def strip_code_fences(code: str) -> str:
     """Strip markdown fences if the model wraps code in them."""
     code = re.sub(r"^```\w*\n?", "", code.strip())
     code = re.sub(r"\n?```$", "", code.strip())
@@ -64,72 +66,85 @@ def _strip_code_fences(code: str) -> str:
 
 
 def get_provider() -> str:
-    """Return current LLM provider name."""
     return _active_provider
 
 
 def set_provider(provider: str) -> None:
-    """Set LLM provider at runtime (for /provider command)."""
     global _active_provider
     _active_provider = provider
 
 
-# ── Manim code generation (Qwen 3.7 Max) ──────────────────────────────────────
+def _build_extra_body() -> dict:
+    """Build extra_body params for Qwen 3.7 Max (DashScope)."""
+    return {"enable_thinking": False}
+
+
+# ── Manim code generation (GPT-5.5) ─────────────────────────────────────────
 
 async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "") -> str:
-    """Ask Qwen 3.7 Max to generate Manim animation code from a text description."""
+    """Generate Manim animation code with GPT-5.5."""
     try:
-        response = await gpt_coding_client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=[
+        kwargs: dict[str, Any] = {
+            "model": GPT_MODEL,
+            "messages": [
                 {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan)},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=8192,
-            timeout=300,
-        )
-        return _strip_code_fences(response.choices[0].message.content or "")
+            "max_tokens": 8192,
+            "timeout": 180,
+        }
+        extra = _build_extra_body()
+        if extra:
+            kwargs["extra_body"] = extra
+
+        response = await gpt_coding_client.chat.completions.create(**kwargs)
+        return strip_code_fences(response.choices[0].message.content or "")
     except Exception as e:
         logger.error(f"GPT code generation error: {e}")
         raise
 
 
 async def fix_manim_code(original_prompt: str, error: str, theme_instructions: str = "") -> str:
-    """Ask Qwen 3.7 Max to fix broken Manim code given the compilation error."""
+    """Fix broken Manim code with GPT-5.5."""
     try:
-        response = await gpt_coding_client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=[
+        kwargs: dict[str, Any] = {
+            "model": GPT_MODEL,
+            "messages": [
                 {"role": "system", "content": build_manim_fix_prompt(error, theme_instructions, original_prompt)},
                 {"role": "user", "content": f"Original request: {original_prompt}"},
             ],
-            max_tokens=8192,
-        )
-        return _strip_code_fences(response.choices[0].message.content or "")
+            "max_tokens": 8192,
+        }
+        extra = _build_extra_body()
+        if extra:
+            kwargs["extra_body"] = extra
+
+        response = await gpt_coding_client.chat.completions.create(**kwargs)
+        return strip_code_fences(response.choices[0].message.content or "")
     except Exception as e:
         logger.error(f"GPT self-heal error: {e}")
         raise
 
 
-# ── Scene planning & layout repair ───────────────────────────────────────
+# ── Scene planning & layout repair ───────────────────────────────────────────
 
 async def generate_scene_plan(prompt: str) -> str:
-    """Ask Qwen 3.7 Max to produce a JSON scene composition plan (objects, timeline, layout).
-
-    This runs BEFORE code generation and constrains spatial layout without
-    dictating the creative metaphor.
-    """
+    """Generate a JSON scene composition plan with GPT-5.5 (fast, low tokens)."""
     try:
-        response = await gpt_coding_client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=[
+        kwargs: dict[str, Any] = {
+            "model": GPT_MODEL,
+            "messages": [
                 {"role": "system", "content": build_scene_plan_prompt()},
                 {"role": "user", "content": f"Plan the scene composition for: {prompt}"},
             ],
-            max_tokens=2048,
-            timeout=120,
-            extra_body={"enable_thinking": False},  # Qwen thinking control
-        )
+            "max_tokens": 1024,
+            "timeout": 60,
+        }
+        extra = _build_extra_body()
+        if extra:
+            kwargs["extra_body"] = extra
+
+        response = await gpt_coding_client.chat.completions.create(**kwargs)
         return (response.choices[0].message.content or "").strip()
     except Exception as e:
         logger.error(f"Scene plan generation error: {e}")
@@ -142,34 +157,33 @@ async def repair_layout(
     theme_instructions: str = "",
     original_prompt: str = "",
 ) -> str:
-    """Ask Qwen 3.7 Max to fix ONLY spatial/timing layout issues, preserving the creative metaphor."""
+    """Fix ONLY spatial/timing layout issues, preserving the creative metaphor."""
     issues_text = "\n".join(f"- {issue}" for issue in issues)
     try:
-        response = await gpt_coding_client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": build_layout_repair_prompt(issues_text, theme_instructions, original_prompt),
-                },
-                {
-                    "role": "user",
-                    "content": f"Fix the layout issues in this Manim code:\n\n{code}",
-                },
+        kwargs: dict[str, Any] = {
+            "model": GPT_MODEL,
+            "messages": [
+                {"role": "system", "content": build_layout_repair_prompt(issues_text, theme_instructions, original_prompt)},
+                {"role": "user", "content": f"Fix the layout issues in this Manim code:\n\n{code}"},
             ],
-            max_tokens=8192,
-            timeout=300,
-        )
-        return _strip_code_fences(response.choices[0].message.content or "")
+            "max_tokens": 8192,
+            "timeout": 180,
+        }
+        extra = _build_extra_body()
+        if extra:
+            kwargs["extra_body"] = extra
+
+        response = await gpt_coding_client.chat.completions.create(**kwargs)
+        return strip_code_fences(response.choices[0].message.content or "")
     except Exception as e:
         logger.error(f"Layout repair error: {e}")
         raise
 
 
-# ── Intent classification ─────────────────────────────────────────────────
+# ── Intent classification ─────────────────────────────────────────────────────
 
 async def classify_intent(prompt: str, provider: str | None = None) -> str:
-    """Classify user intent: ANIMATE or CHAT — routed by provider (per-user or global)."""
+    """Classify user intent: ANIMATE or CHAT."""
     active = provider or _active_provider
     if active == "claude":
         return await _classify_intent_claude(prompt)
@@ -177,7 +191,6 @@ async def classify_intent(prompt: str, provider: str | None = None) -> str:
 
 
 async def _classify_intent_qwen(prompt: str) -> str:
-    """Ask Qwen 3.6 Plus to classify user intent: ANIMATE or CHAT."""
     try:
         response = await qwen_client.chat.completions.create(
             model=CHAT_MODEL,
@@ -207,7 +220,6 @@ async def _classify_intent_qwen(prompt: str) -> str:
 
 
 async def _classify_intent_claude(prompt: str) -> str:
-    """Ask Claude Opus 4.8 to classify user intent: ANIMATE or CHAT."""
     try:
         response = await claude_client.messages.create(
             model=CLAUDE_MODEL,
@@ -230,10 +242,10 @@ async def _classify_intent_claude(prompt: str) -> str:
         return "CHAT"
 
 
-# ── Chat ──────────────────────────────────────────────────────────────────
+# ── Chat ──────────────────────────────────────────────────────────────────────
 
 async def chat(messages: list[dict], provider: str | None = None) -> str:
-    """Chat — routed by provider (per-user or global)."""
+    """Chat — routed by provider."""
     active = provider or _active_provider
     if active == "claude":
         return await _chat_claude(messages)
@@ -241,7 +253,6 @@ async def chat(messages: list[dict], provider: str | None = None) -> str:
 
 
 async def _chat_qwen(messages: list[dict]) -> str:
-    """Chat with Qwen 3.6 Plus — used for general conversation."""
     try:
         response = await qwen_client.chat.completions.create(
             model=CHAT_MODEL,
@@ -262,9 +273,7 @@ async def _chat_qwen(messages: list[dict]) -> str:
 
 
 async def _chat_claude(messages: list[dict]) -> str:
-    """Chat with Claude Opus 4.8 — used for general conversation."""
     try:
-        # Extract system message and convert OpenAI format to Anthropic
         system_msg = ""
         anthropic_messages = []
         for msg in messages:
@@ -286,10 +295,10 @@ async def _chat_claude(messages: list[dict]) -> str:
         return f"⚠️ Chat temporarily unavailable: {e}"
 
 
-# ── Vision ────────────────────────────────────────────────────────────────
+# ── Vision ────────────────────────────────────────────────────────────────────
 
 async def chat_with_image(image_bytes: bytes, caption: str, provider: str | None = None) -> str:
-    """Vision — routed by provider (per-user or global)."""
+    """Vision — routed by provider."""
     active = provider or _active_provider
     if active == "claude":
         return await _chat_with_image_claude(image_bytes, caption)
@@ -297,20 +306,15 @@ async def chat_with_image(image_bytes: bytes, caption: str, provider: str | None
 
 
 async def _chat_with_image_qwen(image_bytes: bytes, caption: str) -> str:
-    """Send image + text to Qwen 3.6 Plus vision endpoint."""
     b64 = base64.b64encode(image_bytes).decode()
     text = caption or "Describe this image in detail."
-
     try:
         response = await qwen_client.chat.completions.create(
             model=CHAT_MODEL,
             messages=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                     {"type": "text", "text": text},
                 ],
             }],
@@ -318,21 +322,18 @@ async def _chat_with_image_qwen(image_bytes: bytes, caption: str) -> str:
             extra_body={"enable_thinking": False},
         )
         content = getattr(response.choices[0].message, "content", None) or ""
-        content = re.sub(r"", "", content, flags=re.DOTALL).strip()
-        return content or "_(empty response)_"
+        content = re.sub(r"^```[a-z]*\n?", "", content.strip(), flags=re.MULTILINE)
+        content = re.sub(r"\n?```$", "", content.strip(), flags=re.MULTILINE)
+        return content.strip() or "_(empty response)_"
     except Exception as e:
         logger.error(f"Qwen vision error: {e}")
         return f"🖼️ Vision temporarily unavailable: {e}"
 
 
 async def _chat_with_image_claude(image_bytes: bytes, caption: str) -> str:
-    """Send image + text to Claude Opus 4.8 vision endpoint."""
     b64 = base64.b64encode(image_bytes).decode()
     text = caption or "Describe this image in detail."
-
     try:
-        media_type = "image/jpeg"  # default for screenshots
-
         response = await claude_client.messages.create(
             model=CLAUDE_MODEL,
             messages=[{
@@ -340,11 +341,7 @@ async def _chat_with_image_claude(image_bytes: bytes, caption: str) -> str:
                 "content": [
                     {
                         "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64,
-                        },
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
                     },
                     {"type": "text", "text": text},
                 ],
@@ -355,3 +352,52 @@ async def _chat_with_image_claude(image_bytes: bytes, caption: str) -> str:
     except Exception as e:
         logger.error(f"Claude vision error: {e}")
         return f"🖼️ Vision temporarily unavailable: {e}"
+
+
+# ── Template config filling ──────────────────────────────────────────────────
+
+TEMPLATE_CONFIG_PROMPT = """You are a scene configuration assistant. Given a user's animation description and a template name, fill in the template parameters as JSON.
+
+Template: {template_name}
+User prompt: {prompt}
+
+Respond with ONLY a valid JSON object matching this schema:
+{{
+  "title": "string — title of the animation",
+  "equation": "string — LaTeX equation to display (or empty)",
+  "damping": "number — damping coefficient (default 0.15)",
+  "frequency": "number — oscillation frequency (default 1.0)",
+  "amplitude": "number — amplitude (default 1.0)",
+  "colors": ["#hex", "#hex", "#hex"] — 3 colors for the scene",
+  "duration": "integer — scene duration in seconds (10-20)",
+  "extra_params": {{"key": value}} — any additional template-specific parameters"
+}}
+
+Only include parameters that differ from defaults. No explanation, no markdown fences.
+"""
+
+
+async def fill_template_config(template_name: str, prompt: str) -> dict[str, Any]:
+    """Ask LLM to fill a small JSON config for a template."""
+    try:
+        response = await qwen_client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a JSON-only parameter filler for Manim animation templates."},
+                {"role": "user", "content": TEMPLATE_CONFIG_PROMPT.format(
+                    template_name=template_name, prompt=prompt
+                )},
+            ],
+            max_tokens=512,
+            timeout=30,
+            extra_body={"enable_thinking": False},
+        )
+        content = getattr(response.choices[0].message, "content", None) or ""
+        content = re.sub(r"^```[a-z]*\n?", "", content.strip(), flags=re.MULTILINE)
+        content = re.sub(r"\n?```$", "", content.strip(), flags=re.MULTILINE)
+
+        import json
+        return json.loads(content.strip())
+    except Exception as e:
+        logger.error(f"Template config fill error: {e}")
+        return {}

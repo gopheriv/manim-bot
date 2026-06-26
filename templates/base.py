@@ -1,0 +1,134 @@
+"""Base template class for speculative scene generation.
+
+Each template is a proven, pre-tested Manim scene that accepts a small
+JSON config (equations, colors, labels) instead of generating 200+ lines
+of code from scratch. This reduces LLM code gen time from 30-90s to 5-15s.
+"""
+
+from __future__ import annotations
+
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class TemplateConfig:
+    """Parameters filled by LLM to customize a template scene."""
+    title: str = ""
+    equation: str = ""
+    description: str = ""
+    damping: float = 0.15
+    frequency: float = 1.0
+    amplitude: float = 1.0
+    colors: list[str] = field(default_factory=lambda: ["#06B6D4", "#10B981", "#8B5CF6"])
+    duration: int = 15
+    extra_params: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class TemplateMatch:
+    """Result of matching a user prompt against a template."""
+    template: "SceneTemplate"
+    confidence: float  # 0.0-1.0
+    config: TemplateConfig
+
+
+class SceneTemplate(ABC):
+    """Base class for all pre-built Manim scene templates."""
+
+    # Must be set by subclasses
+    name: str = ""
+    keywords: list[str] = []  # keywords for fuzzy matching
+    category: str = ""  # oscillator, fourier, calculus, etc.
+
+    @abstractmethod
+    def generate_code(self, config: TemplateConfig) -> str:
+        """Generate complete Manim scene code from a filled config.
+
+        This is deterministic — no LLM calls needed. Returns valid Python
+        that can be written to a .py file and rendered immediately.
+        """
+
+    def match_score(self, prompt: str) -> float:
+        """Score how well this template matches the user prompt (0.0-1.0).
+
+        Default: keyword-based fuzzy matching. Subclasses can override
+        for more sophisticated matching.
+        """
+        prompt_lower = prompt.lower()
+        if not self.keywords:
+            return 0.0
+
+        matches = 0
+        for kw in self.keywords:
+            # Exact substring match
+            if kw in prompt_lower:
+                matches += 1.0
+            # Partial match (stem prefix)
+            elif any(kw.startswith(p) for p in prompt_lower.split() if len(p) >= 4):
+                matches += 0.5
+
+        return min(matches / max(len(self.keywords) * 0.5, 1), 1.0)
+
+    def default_config(self) -> TemplateConfig:
+        """Return sensible defaults — LLM only needs to override what matters."""
+        return TemplateConfig()
+
+
+def _common_manim_header(class_name: str = "GenScene") -> str:
+    """Return the standard Manim scene header used by all templates."""
+    return f"""from manim import *
+import numpy as np
+import math
+
+
+class {class_name}(Scene):
+    def construct(self):
+        self.camera.background_color = "#0A0A0F"
+"""
+
+
+def _indent(code: str, spaces: int = 8) -> str:
+    """Indent all lines for nesting inside construct()."""
+    prefix = " " * spaces
+    return "\n".join(prefix + line if line.strip() else line for line in code.split("\n"))
+
+
+def _star_field(count: int = 25, spread: float = 6.0) -> str:
+    """Generate background star/particle field — shared by all templates."""
+    return f"""
+# Background particle field
+stars = VGroup()
+for i in range({count}):
+    angle = (i / {count}) * TAU
+    r = np.random.uniform(1, {spread})
+    star = Dot(
+        r * np.array([math.cos(angle), math.sin(angle), 0]),
+        radius=0.03,
+        color=WHITE,
+        opacity=0.3
+    )
+    stars.add(star)
+self.play(FadeIn(stars, run_time=2), rate_func=smooth)
+
+# Add subtle drift to stars
+for s in stars:
+    s.add_updater(lambda m, dt: m.shift(UP * 0.001 * math.sin(dt * 0.5)))
+"""
+
+
+def _glow_layer(obj_name: str, color: str, width: int = 12, opacity: float = 0.15) -> str:
+    """Add a glow copy behind a Manim object.
+
+    Returns plain Python code (NOT inside an f-string), so obj_name is
+    interpolated once here and appears as a literal identifier in the output.
+    """
+    glow_name = f"{obj_name}_glow"
+    return (
+        f"\n{glow_name} = {obj_name}.copy()"
+        f".set_stroke(width={width}, opacity={opacity})"
+        f".set_fill(opacity=0)\n"
+        f"self.add({glow_name})\n"
+    )

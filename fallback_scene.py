@@ -64,7 +64,6 @@ class GenScene(Scene):
             radius=0.08,
             color=yellow,
         ).set_z_index(8))
-        trail = TracedPath(dot.get_center, stroke_color=yellow, stroke_width=3, dissipating_time=1.6).set_z_index(7)
 
         idea = Text("A question becomes motion, structure, then insight", font_size=28, color=white)
         idea.to_edge(DOWN, buff=0.45)
@@ -79,15 +78,14 @@ class GenScene(Scene):
 
         self.play(FadeIn(title_group, shift=DOWN * 0.15), FadeIn(plane), FadeIn(axes), run_time=1.4)
         self.play(Create(glow), Create(curve), run_time=2.4, rate_func=smooth)
-        self.add(trail, dot)
+        self.add(dot)
         self.play(moving_x.animate.set_value(4.4), LaggedStart(*[FadeIn(n, scale=0.6) for n in nodes], lag_ratio=0.12), run_time=4.2, rate_func=smooth)
-        self.play(FadeIn(idea_group, shift=UP * 0.15), nodes.animate.set_color_by_gradient(coral, yellow, teal, blue), run_time=1.2)
+        self.play(FadeIn(idea_group, shift=UP * 0.15), run_time=1.2)
 
         pulse_t = ValueTracker(0)
         def breathe(mob, dt):
             pulse_t.increment_value(dt)
             mob.set_stroke(opacity=0.72 + 0.25 * np.sin(pulse_t.get_value() * 2.2))
         nodes.add_updater(breathe)
-        self.play(glow.animate.set_stroke(width=16, opacity=0.24), run_time=2.0, rate_func=there_and_back)
-        self.wait(0.5)
+        self.wait(1.5)
 '''

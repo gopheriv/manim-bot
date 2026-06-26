@@ -1,4 +1,4 @@
-"""Manim Animation Bot — Telegram bot with Qwen 3.7 Max code gen, Qwen 3.6 chat,
+﻿"""Manim Animation Bot вЂ” Telegram bot with Qwen 3.7 Max code gen, Qwen 3.6 chat,
 edge-tts voiceover, themes, queue management, rate limiting, and D1 caching."""
 
 import asyncio
@@ -31,9 +31,8 @@ from config import (
     MANIM_MAX_RETRIES,
 )
 from database import db
-from examples import get_all_examples, get_example_by_index
 from fallback_scene import build_fallback_scene
-from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, generate_scene_plan, repair_layout
+from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, generate_scene_plan, repair_layout, strip_code_fences, fill_template_config
 from scene_planner import parse_scene_plan, format_plan_for_prompt
 from scene_validator import validate_layout, has_issues
 from markdown_utils import strip_markdown
@@ -43,6 +42,11 @@ from renderer import render, cleanup, get_last_generated_code
 import settings as user_settings
 from themes import get_theme, next_theme, build_theme_prompt, THEME_ORDER
 from voiceover import add_voiceover
+from templates import get_registry
+
+# Ensure log directory exists before configuring handlers
+from pathlib import Path
+Path("logs").mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +67,7 @@ dp = Dispatcher()
 # ---------------------------------------------------------------------------
 
 async def _safe_reply(message: types.Message, text: str, **kwargs) -> None:
-    """Send a text reply with Markdown safety — falls back to plain text on parse errors."""
+    """Send a text reply with Markdown safety вЂ” falls back to plain text on parse errors."""
     try:
         await message.reply(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except TelegramBadRequest:
@@ -88,15 +92,8 @@ async def _safe_answer(message: types.Message, text: str, **kwargs) -> None:
             await message.answer(plain[:4000])
 
 
-def _strip_code_fences(code: str) -> str:
-    """Remove markdown code fences from LLM output."""
-    code = re.sub(r"^```\w*\n?", "", code.strip())
-    code = re.sub(r"\n?```$", "", code.strip())
-    return code
-
-
 async def _safe_edit(message: types.Message, text: str, **kwargs) -> None:
-    """Edit a message with Markdown safety — falls back to plain text on parse errors."""
+    """Edit a message with Markdown safety вЂ” falls back to plain text on parse errors."""
     try:
         await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except TelegramBadRequest:
@@ -110,26 +107,56 @@ async def _safe_edit(message: types.Message, text: str, **kwargs) -> None:
 def _build_progress_bar(pct: int, width: int = 20) -> str:
     """Build a filled progress bar string."""
     filled = pct * width // 100
-    return "█" * filled + "░" * (width - filled)
+    return "в–€" * filled + "в–‘" * (width - filled)
+
+
+# ---------------------------------------------------------------------------
+# Inline example list (replaces deleted examples.py module)
+# ---------------------------------------------------------------------------
+
+_EXAMPLES = [
+    {"name": "Taylor Series", "prompt": "animate the Taylor series approximation of sin(x) showing each term building up", "category": "Calculus", "is_3d": False},
+    {"name": "Fourier Transform", "prompt": "show me how a Fourier transform decomposes a signal into sine waves", "category": "Calculus", "is_3d": False},
+    {"name": "Parametric Curve", "prompt": "animate a particle moving along a parametric curve with a glowing trail", "category": "Geometry", "is_3d": False},
+    {"name": "Eigenvalues", "prompt": "visualize the eigenvalues of a 2x2 matrix as it transforms the unit circle", "category": "Linear Algebra", "is_3d": False},
+    {"name": "Central Limit Theorem", "prompt": "animate the central limit theorem with random distributions converging to a bell curve", "category": "Probability", "is_3d": False},
+    {"name": "Riemann Sum", "prompt": "show the Riemann sum approximation of an integral with rectangles converging", "category": "Calculus", "is_3d": False},
+    {"name": "Damped Oscillator", "prompt": "animate a damped harmonic oscillator with phase space diagram", "category": "Physics", "is_3d": False},
+    {"name": "Gradient Descent", "prompt": "visualize how gradient descent finds the minimum of a loss function", "category": "Calculus", "is_3d": False},
+    {"name": "Voronoi Diagram", "prompt": "animate the construction of a Voronoi diagram from random seed points", "category": "Geometry", "is_3d": False},
+    {"name": "Newton's Method", "prompt": "show the convergence of Newton's method for finding roots", "category": "Calculus", "is_3d": False},
+    {"name": "Mandelbrot Zoom", "prompt": "animate the Mandelbrot set zoom-in revealing self-similarity", "category": "Complex Analysis", "is_3d": False},
+    {"name": "Cross Product", "prompt": "visualize the cross product of two vectors as a changing parallelogram area", "category": "Linear Algebra", "is_3d": False},
+]
+
+
+def get_all_examples() -> list[dict]:
+    """Return all example prompts."""
+    return list(_EXAMPLES)
+
+
+def get_example_by_index(index: int) -> dict:
+    """Return a specific example by index (wraps around)."""
+    return _EXAMPLES[index % len(_EXAMPLES)]
 
 
 # ---------------------------------------------------------------------------
 # Progress Updates (chat action spinner while LLM generates code)
 # ---------------------------------------------------------------------------
 
-async def _progress_loop(chat_id: int, render_task, narration_task, status_message: types.Message | None = None):
+async def _progress_loop(chat_id: int, render_task, narration_task: asyncio.Task | None, status_message: types.Message | None = None):
     """Send periodic chat action updates while render/narration run in parallel.
     If status_message is provided, also update the text with a progress bar.
     """
     actions = [
-        (ChatAction.RECORD_VIDEO, "🎬 Rendering animation…"),
-        (ChatAction.RECORD_VIDEO, "🎨 Drawing frames…"),
-        (ChatAction.UPLOAD_VIDEO, "⏳ Finalizing…"),
+        (ChatAction.RECORD_VIDEO, "рџЋ¬ Rendering animationвЂ¦"),
+        (ChatAction.RECORD_VIDEO, "рџЋЁ Drawing framesвЂ¦"),
+        (ChatAction.UPLOAD_VIDEO, "вЏі FinalizingвЂ¦"),
     ]
     idx = 0
-    start_time = asyncio.get_event_loop().time()
+    start_time = asyncio.get_running_loop().time()
     try:
-        while not (render_task.done() and narration_task.done()):
+        while not (render_task.done() and (narration_task is None or narration_task.done())):
             action, label = actions[idx % len(actions)]
             try:
                 await bot.send_chat_action(chat_id, action)
@@ -138,7 +165,7 @@ async def _progress_loop(chat_id: int, render_task, narration_task, status_messa
 
             # Update progress bar text every 30s
             if status_message and idx % 2 == 0:
-                elapsed = int(asyncio.get_event_loop().time() - start_time)
+                elapsed = int(asyncio.get_running_loop().time() - start_time)
                 progress_bar = _render_progress_bar(elapsed)
                 try:
                     await status_message.edit_text(progress_bar, parse_mode=ParseMode.MARKDOWN)
@@ -182,7 +209,7 @@ async def _classify_intent(text: str, chat_id: int) -> str:
 
     try:
         result = await classify_intent(cleaned, provider=user_settings.get(chat_id, "provider"))
-        logger.debug(f"LLM intent: '{cleaned}' → {result}")
+        logger.debug(f"LLM intent: '{cleaned}' в†’ {result}")
         return result
     except Exception as e:
         logger.warning(f"Intent classification failed, defaulting to CHAT: {e}")
@@ -206,13 +233,13 @@ async def _send_animation(
     # Rate limiting
     allowed, retry_after = rate_limiter.check_rate_limit(chat_id, "animate")
     if not allowed:
-        await _safe_reply(message, f"⏳ Rate limit reached. Try again in {retry_after}s.")
+        await _safe_reply(message, f"вЏі Rate limit reached. Try again in {retry_after}s.")
         return
 
     # Check for existing task
     existing = render_queue.get_user_task(chat_id)
     if existing:
-        await _safe_reply(message, f"⏳ You already have a render in progress: `{existing.prompt[:50]}…`")
+        await _safe_reply(message, f"вЏі You already have a render in progress: `{existing.prompt[:50]}вЂ¦`")
         return
 
     # Get user settings
@@ -234,8 +261,8 @@ async def _send_animation(
         if cached_file_id:
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
-            await message.reply_video(video=cached_file_id, caption="⚡ Cached result")
-            logger.info(f"Animation done — chat_id={chat_id}, cache HIT")
+            await message.reply_video(video=cached_file_id, caption="вљЎ Cached result")
+            logger.info(f"Animation done вЂ” chat_id={chat_id}, cache HIT")
             return
     except Exception as e:
         logger.warning(f"Cache check failed (degraded): {e}")
@@ -246,54 +273,82 @@ async def _send_animation(
         task.started_at = datetime.now()
 
         try:
-            await _safe_reply(message, (
-                f"🤖 Generating Manim code with **{GPT_MODEL}**…\n"
-                f"🎨 Theme: **{theme.name}** | Quality: `{user_quality}`"
-            ))
+            # ── TEMPLATE MATCHING: try fast path before full code gen ──
+            template_match = get_registry().match(prompt)
+            code: str = ""
 
-            # Build theme-aware system prompt
-            theme_prompt = build_theme_prompt(theme)
-
-            # ── Scene Awareness: plan → generate → validate → repair ──
-            # Step 1: Generate scene composition plan (non-fatal on failure)
-            scene_plan_json: str = ""
-            try:
-                raw_plan = await generate_scene_plan(prompt)
-                plan = parse_scene_plan(raw_plan)
-                if plan:
-                    scene_plan_json = format_plan_for_prompt(plan)
-                    logger.info(f"Scene plan generated: {len(plan.get('objects', []))} objects, "
-                                f"{len(plan.get('phases', []))} phases")
-                else:
-                    logger.warning("Scene plan parsing failed, proceeding without plan")
-            except Exception as e:
-                logger.warning(f"Scene plan generation failed (non-fatal): {e}")
-
-            # Step 2: Generate code with scene plan context (with retries)
-            code = None
-            for attempt in range(1, GPT_MAX_RETRIES + 1):
-                try:
-                    logger.info(f"Trying {GPT_MODEL} for code generation (attempt {attempt}/{GPT_MAX_RETRIES})")
-                    code = await generate_manim_code(
-                        prompt, theme_instructions=theme_prompt, scene_plan=scene_plan_json
+            if template_match:
+                # Fast path: LLM fills small JSON config → template generates code
+                await _safe_reply(message, (
+                    f"🎨 Template: **{template_match.template.name}** "
+                    f"(confidence {template_match.confidence:.2f})\n"
+                    f"🔧 Filling parameters…"
+                ))
+                config_dict = await fill_template_config(
+                    template_match.template.name, prompt
+                )
+                if config_dict:
+                    config = template_match.config
+                    # Override defaults with LLM-filled values
+                    for key, val in config_dict.items():
+                        if hasattr(config, key):
+                            setattr(config, key, val)
+                    # Generate code from template (deterministic, no LLM)
+                    code = template_match.template.generate_code(config)
+                    logger.info(
+                        "Template %s generated code (%d chars) in config-fill mode",
+                        template_match.template.name, len(code),
                     )
-                    if code and code.strip():
-                        break
+
+            if not code:
+                # Slow path: full LLM code generation
+                await _safe_reply(message, (
+                    f"🤖 Generating Manim code with **{GPT_MODEL}**…\n"
+                    f"🎨 Theme: **{theme.name}** | Quality: `{user_quality}`"
+                ))
+
+                # Build theme-aware system prompt
+                theme_prompt = build_theme_prompt(theme)
+
+                # ── Scene Awareness: plan → generate → validate → repair ──
+                # Step 1: Generate scene composition plan (non-fatal on failure)
+                scene_plan_json: str = ""
+                try:
+                    raw_plan = await generate_scene_plan(prompt)
+                    plan = parse_scene_plan(raw_plan)
+                    if plan:
+                        scene_plan_json = format_plan_for_prompt(plan)
+                        logger.info(f"Scene plan generated: {len(plan.get('objects', []))} objects, "
+                                    f"{len(plan.get('phases', []))} phases")
+                    else:
+                        logger.warning("Scene plan parsing failed, proceeding without plan")
                 except Exception as e:
-                    logger.warning(f"Code gen attempt {attempt} failed: {e}")
-                    if attempt == GPT_MAX_RETRIES:
-                        raise
-                    await asyncio.sleep(2)
+                    logger.warning(f"Scene plan generation failed (non-fatal): {e}")
 
-            if not code or not code.strip():
-                await _safe_reply(message, "⚠️ Empty code generated. Try rephrasing your description.")
-                task.status = TaskStatus.FAILED
-                task.error_message = "Empty code"
-                task.completed_at = datetime.now()
-                analytics.log_render_failure(chat_id, "empty_code")
-                return
+                # Step 2: Generate code with scene plan context (with retries)
+                for attempt in range(1, GPT_MAX_RETRIES + 1):
+                    try:
+                        logger.info(f"Trying {GPT_MODEL} for code generation (attempt {attempt}/{GPT_MAX_RETRIES})")
+                        code = await generate_manim_code(
+                            prompt, theme_instructions=theme_prompt, scene_plan=scene_plan_json
+                        )
+                        if code and code.strip():
+                            break
+                    except Exception as e:
+                        logger.warning(f"Code gen attempt {attempt} failed: {e}")
+                        if attempt == GPT_MAX_RETRIES:
+                            raise
+                        await asyncio.sleep(2)
 
-            code = _strip_code_fences(code)
+                if not code or not code.strip():
+                    await _safe_reply(message, "⚠️ Empty code generated. Try rephrasing your description.")
+                    task.status = TaskStatus.FAILED
+                    task.error_message = "Empty code"
+                    task.completed_at = datetime.now()
+                    analytics.log_render_failure(chat_id, "empty_code")
+                    return
+
+            code = strip_code_fences(code)
 
             # Step 3: Layout validation — detect overlap/crowding before rendering
             layout_issues = validate_layout(code)
@@ -302,11 +357,11 @@ async def _send_animation(
                 for issue in layout_issues:
                     logger.debug(f"  Layout issue: {issue}")
 
-                # Step 4: Layout repair — fix ONLY spatial/timing, preserve creative metaphor
+                # Step 4: Layout repair вЂ” fix ONLY spatial/timing, preserve creative metaphor
                 try:
                     repaired = await repair_layout(code, layout_issues, theme_prompt, prompt)
                     if repaired and repaired.strip():
-                        repaired = _strip_code_fences(repaired)
+                        repaired = strip_code_fences(repaired)
                         # Verify repaired code still has structure
                         if "class GenScene" in repaired and "def construct" in repaired:
                             code = repaired
@@ -318,27 +373,27 @@ async def _send_animation(
                 except Exception as e:
                     logger.warning(f"Layout repair failed (non-fatal): {e}")
 
-            # ── Parallel: render + narration generation ──
+            # в”Ђв”Ђ Parallel: render + narration generation в”Ђв”Ђ
             render_start = datetime.now()
 
             # Status message that gets updated with real Manim progress
-            status_msg = await message.reply("🎬 Preparing render…")
+            status_msg = await message.reply("рџЋ¬ Preparing renderвЂ¦")
 
             # Check scene weight before rendering (for user info)
             from renderer import _estimate_scene_weight
             weight = _estimate_scene_weight(code)
             if weight.is_heavy:
-                await _safe_edit(status_msg, "⚠️ Heavy scene detected — auto-optimizing for your hardware…")
+                await _safe_edit(status_msg, "вљ пёЏ Heavy scene detected вЂ” auto-optimizing for your hardwareвЂ¦")
                 await asyncio.sleep(0.5)  # Let user see the warning
             _render_progress = {"pct": 0, "anim": ""}
 
             def _on_manim_progress(pct: int, anim_name: str) -> None:
-                """Callback from renderer — updates Telegram status message."""
+                """Callback from renderer вЂ” updates Telegram status message."""
                 _render_progress["pct"] = pct
                 _render_progress["anim"] = anim_name
                 bar = _build_progress_bar(pct)
                 asyncio.create_task(
-                    _safe_edit(status_msg, f"🎬 *Rendering…*\n{bar} {pct}%\n🎞️ `{anim_name[:40]}`")
+                    _safe_edit(status_msg, f"рџЋ¬ *RenderingвЂ¦*\n{bar} {pct}%\nрџЋћпёЏ `{anim_name[:40]}`")
                 )
 
             render_coro = render(
@@ -347,20 +402,20 @@ async def _send_animation(
             )
 
             if user_voiceover and VOICEOVER_ENABLED:
-                # Launch both in parallel — saves ~15-30s
+                # Launch both in parallel вЂ” saves ~15-30s
                 render_task = asyncio.create_task(render_coro)
                 narration_task = asyncio.create_task(_generate_narration(prompt))
 
-                # Periodic progress updates while waiting — edit bot's own message
+                # Periodic progress updates while waiting вЂ” edit bot's own message
                 progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, narration_task, status_msg))
 
                 video_path = await render_task
                 narration = await narration_task
                 progress_task.cancel()
             else:
-                # No voiceover — still show progress
+                # No voiceover вЂ” still show progress
                 render_task = asyncio.create_task(render_coro)
-                progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, asyncio.sleep(0), status_msg))
+                progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None, status_msg))
                 video_path = await render_task
                 progress_task.cancel()
                 narration = None
@@ -369,7 +424,7 @@ async def _send_animation(
             if task.is_cancelled():
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.now()
-                await _safe_reply(message, "❌ Render cancelled.")
+                await _safe_reply(message, "вќЊ Render cancelled.")
                 return
 
             # Self-healing: up to 2 retries with escalating simplification
@@ -377,13 +432,13 @@ async def _send_animation(
                 error_msg = render._last_error
                 if "cancelled" not in error_msg.lower():
                     for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
-                        logger.info("Render failed — self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
-                        await _safe_reply(message, f"🔧 Render failed, asking Qwen 3.7 Max to fix the code (attempt {heal_attempt})…")
+                        logger.info("Render failed вЂ” self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
+                        await _safe_reply(message, f"рџ”§ Render failed, asking Qwen 3.7 Max to fix the code (attempt {heal_attempt})вЂ¦")
 
                         try:
                             fixed_code = await fix_manim_code(prompt, error_msg, theme_prompt)
                             if fixed_code and fixed_code.strip():
-                                fixed_code = _strip_code_fences(fixed_code)
+                                fixed_code = strip_code_fences(fixed_code)
                                 video_path = await render(
                                     fixed_code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
                                     cancel_event=task.cancel_event, progress_cb=_on_manim_progress,
@@ -394,14 +449,14 @@ async def _send_animation(
                                 # Second attempt: simplify if first repair also failed
                                 if heal_attempt == 1:
                                     error_msg = render._last_error or error_msg
-                                    await _safe_reply(message, "🔧 Still failing — trying a simpler version…")
+                                    await _safe_reply(message, "рџ”§ Still failing вЂ” trying a simpler versionвЂ¦")
                                     fixed_code = await fix_manim_code(
                                         prompt,
                                         f"Previous repair also failed. SIMPLIFY the scene: reduce object count, remove heavy updaters, fewer self.play() calls, shorter duration. Error: {error_msg}",
                                         theme_prompt,
                                     )
                                     if fixed_code and fixed_code.strip():
-                                        fixed_code = _strip_code_fences(fixed_code)
+                                        fixed_code = strip_code_fences(fixed_code)
                                         video_path = await render(
                                             fixed_code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
                                             cancel_event=task.cancel_event, progress_cb=_on_manim_progress,
@@ -416,14 +471,14 @@ async def _send_animation(
             if task.is_cancelled():
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.now()
-                await _safe_reply(message, "❌ Render cancelled.")
+                await _safe_reply(message, "вќЊ Render cancelled.")
                 return
 
             # Deterministic fallback: never fail a user request just because generated code is brittle.
             if video_path is None:
                 error_detail = render._last_error or "Unknown error"
                 logger.warning("LLM render failed after repair; using deterministic fallback. Last error: %s", error_detail[:700])
-                await _safe_reply(message, "🛟 Generated code was unstable, rendering a safe fallback animation instead…")
+                await _safe_reply(message, "рџ›џ Generated code was unstable, rendering a safe fallback animation insteadвЂ¦")
                 fallback_code = build_fallback_scene(prompt, bg_color=theme.bg_color)
                 video_path = await render(
                     fallback_code, chat_id, timeout=min(MANIM_TIMEOUT, 180), quality="-ql",
@@ -435,7 +490,7 @@ async def _send_animation(
                     if task.is_cancelled():
                         task.status = TaskStatus.CANCELLED
                         task.completed_at = datetime.now()
-                        await _safe_reply(message, "❌ Render cancelled.")
+                        await _safe_reply(message, "вќЊ Render cancelled.")
                         return
                     error_display = (render._last_error or error_detail or "Unknown error")[:500]
                     task.status = TaskStatus.FAILED
@@ -443,7 +498,7 @@ async def _send_animation(
                     task.completed_at = datetime.now()
                     analytics.log_render_failure(chat_id, "render_failed")
                     await _safe_reply(message, (
-                        f"❌ Animation failed after generated, repaired, and fallback attempts.\n\n"
+                        f"вќЊ Animation failed after generated, repaired, and fallback attempts.\n\n"
                         f"**Error:**\n```\n{error_display}\n```"
                     ))
                     return
@@ -468,10 +523,11 @@ async def _send_animation(
 
             # Send result
             await bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
+            reasoning_tag = f" | {GPT_REASONING_EFFORT} reasoning" if GPT_REASONING_EFFORT else ""
             video_file = FSInputFile(str(video_path))
             sent = await message.reply_video(
                 video=video_file,
-                caption=f"🎬 `{GPT_MODEL}` | {theme.name} | {GPT_REASONING_EFFORT} reasoning",
+                caption=f"рџЋ¬ `{GPT_MODEL}` | {theme.name}{reasoning_tag}",
             )
 
             # Save to database
@@ -501,7 +557,7 @@ async def _send_animation(
                     d1.save_render(chat_id, prompt, code, telegram_file_id)
                 )
 
-            logger.info(f"Animation done — chat_id={chat_id}, prompt={prompt[:50]}…")
+            logger.info(f"Animation done вЂ” chat_id={chat_id}, prompt={prompt[:50]}вЂ¦")
 
         except Exception as e:
             logger.error(f"Animation pipeline error: {e}", exc_info=True)
@@ -509,7 +565,7 @@ async def _send_animation(
             task.error_message = str(e)
             task.completed_at = datetime.now()
             analytics.log_render_failure(chat_id, "pipeline_error")
-            await _safe_reply(message, f"⚠️ Animation failed: {e}")
+            await _safe_reply(message, f"вљ пёЏ Animation failed: {e}")
 
 
 async def _generate_narration(prompt: str) -> str:
@@ -529,14 +585,14 @@ async def _generate_narration(prompt: str) -> str:
     ]
     try:
         text = await chat(messages)
-        return text.strip() if text and not text.startswith("⚠️") else None
+        return text.strip() if text and not text.startswith("вљ пёЏ") else None
     except Exception as e:
         logger.warning(f"Narration generation failed: {e}")
         return None
 
 
 # ---------------------------------------------------------------------------
-# Handlers — Commands
+# Handlers вЂ” Commands
 # ---------------------------------------------------------------------------
 
 @dp.message(Command("start"))
@@ -544,13 +600,13 @@ async def cmd_start(message: types.Message) -> None:
     user_provider = user_settings.get(message.chat.id, "provider")
     provider_name = "Claude Opus 4.8" if user_provider == "claude" else "Qwen 3.6 Plus"
     models = (
-        f"**Qwen 3.7 Max**: `{GPT_MODEL}` (reasoning: `{GPT_REASONING_EFFORT}`)\n"
+        f"**Code gen**: `{GPT_MODEL}` (reasoning: `{GPT_REASONING_EFFORT or 'default'}`)\n"
         f"**Chat**: `{provider_name}` (`{user_provider}`)"
     )
     await _safe_answer(message, (
         "🎬 **Manim Animation Bot + AI Assistant**\n\n"
         f"{models}\n\n"
-        "I create polished Manim explainers with a **Visual Math** style: "
+        "I create polished Manim explainers: "
         "clean geometry, semantic color, smooth transforms, and readable equations.\n\n"
         "**Commands:**\n"
         "• Send me text → I'll classify intent automatically\n"
@@ -564,7 +620,7 @@ async def cmd_start(message: types.Message) -> None:
         "• `/history` → your recent animations\n"
         "• `/stats` → global statistics\n"
         "• `/clean` → clear render cache\n"
-        "• `/help` → show this message\n\n"
+        "• `/cancel` → cancel current render\n\n"
         "Try: *Animate why matrix multiplication is function composition*"
     ))
 
@@ -578,7 +634,7 @@ async def cmd_help(message: types.Message) -> None:
 async def cmd_clean(message: types.Message) -> None:
     cleanup()
     render_queue.cleanup_old_tasks()
-    await _safe_answer(message, "🧹 Render cache cleaned.")
+    await _safe_answer(message, "рџ§№ Render cache cleaned.")
 
 
 @dp.message(Command("history"))
@@ -588,21 +644,21 @@ async def cmd_history(message: types.Message) -> None:
     try:
         records = db.get_user_history(message.chat.id, limit=10)
         if not records:
-            await _safe_reply(message, "📭 No animation history yet. Try `/animation rotating cube`!")
+            await _safe_reply(message, "рџ“­ No animation history yet. Try `/animation rotating cube`!")
             return
 
-        lines = ["📜 **Your Recent Animations:**\n"]
+        lines = ["рџ“њ **Your Recent Animations:**\n"]
         for i, rec in enumerate(records, 1):
             prompt = rec.get("prompt", "unknown")[:50]
             status = rec.get("status", "unknown")
             theme = rec.get("theme", "default")
-            emoji = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
-            lines.append(f"{i}. {emoji} `{prompt}` — _{theme}_")
+            emoji = "вњ…" if status == "completed" else "вќЊ" if status == "failed" else "вЏі"
+            lines.append(f"{i}. {emoji} `{prompt}` вЂ” _{theme}_")
         lines.append(f"\n**Total:** {len(records)} animation(s)")
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"History error: {e}")
-        await _safe_reply(message, f"⚠️ Couldn't fetch history: {e}")
+        await _safe_reply(message, f"вљ пёЏ Couldn't fetch history: {e}")
 
 
 @dp.message(Command("code"))
@@ -617,16 +673,16 @@ async def cmd_code(message: types.Message) -> None:
             code = get_last_generated_code(message.chat.id)
 
         if not code:
-            await _safe_reply(message, "📭 No code available yet. Try `/animation rotating cube` first!")
+            await _safe_reply(message, "рџ“­ No code available yet. Try `/animation rotating cube` first!")
             return
 
         if len(code) > 3800:
             code = code[:3800] + "\n\n# ... truncated"
 
-        await _safe_answer(message, f"🐍 **Last Generated Code:**\n```python\n{code}\n```")
+        await _safe_answer(message, f"рџђЌ **Last Generated Code:**\n```python\n{code}\n```")
     except Exception as e:
         logger.error(f"Code fetch error: {e}")
-        await _safe_reply(message, f"⚠️ Couldn't fetch code: {e}")
+        await _safe_reply(message, f"вљ пёЏ Couldn't fetch code: {e}")
 
 
 @dp.message(Command("stats"))
@@ -639,12 +695,12 @@ async def cmd_stats(message: types.Message) -> None:
         top_errors = analytics.get_top_errors(limit=5)
 
         lines = [
-            "📊 **Bot Statistics**\n",
+            "рџ“Љ **Bot Statistics**\n",
             f"**Global:** {global_stats['total']} renders | "
-            f"{global_stats['completed']} ✅ | {global_stats['failed']} ❌ | "
+            f"{global_stats['completed']} вњ… | {global_stats['failed']} вќЊ | "
             f"{global_stats['unique_users']} users",
             f"**You:** {user_stats['renders']} renders | "
-            f"{user_stats['success']} ✅ | {user_stats['failed']} ❌",
+            f"{user_stats['success']} вњ… | {user_stats['failed']} вќЊ",
             f"**Avg render time:** {render_stats['avg_render_time']:.1f}s",
             f"**Success rate:** {render_stats['success_rate']:.1f}%",
         ]
@@ -652,12 +708,12 @@ async def cmd_stats(message: types.Message) -> None:
         if top_errors:
             lines.append("\n**Top Errors (24h):**")
             for err_type, count in top_errors:
-                lines.append(f"  • `{err_type}`: {count}")
+                lines.append(f"  вЂў `{err_type}`: {count}")
 
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"Stats error: {e}")
-        await _safe_reply(message, f"⚠️ Couldn't fetch stats: {e}")
+        await _safe_reply(message, f"вљ пёЏ Couldn't fetch stats: {e}")
 
 
 @dp.message(Command("animation"))
@@ -680,7 +736,7 @@ async def cmd_theme(message: types.Message) -> None:
     new_theme = next_theme(current)
     user_settings.set(message.chat.id, "theme", new_theme)
     theme = get_theme(new_theme)
-    await _safe_reply(message, f"🎨 Theme set to **{theme.name}**\n\n_{theme.palette_desc[:100]}…_")
+    await _safe_reply(message, f"рџЋЁ Theme set to **{theme.name}**\n\n_{theme.palette_desc[:100]}вЂ¦_")
 
 
 @dp.message(Command("settings"))
@@ -691,26 +747,26 @@ async def cmd_settings(message: types.Message) -> None:
         theme = get_theme(s.get("theme", "visual_math"))
         provider_name = "Claude Opus 4.8" if s.get("provider") == "claude" else "Qwen 3.6 Plus"
         lines = [
-            "⚙️ **Your Settings**\n",
+            "вљ™пёЏ **Your Settings**\n",
             f"**Theme:** {theme.name}",
-            f"**Style:** visual intuition → transformation → insight → recap",
+            f"**Style:** visual intuition в†’ transformation в†’ insight в†’ recap",
             f"**Quality:** `{s.get('quality', MANIM_QUALITY)}`",
             f"**Chat LLM:** {provider_name}",
-            f"**Voiceover:** {'✅ enabled' if s.get('voiceover_enabled') else '❌ disabled'}",
+            f"**Voiceover:** {'вњ… enabled' if s.get('voiceover_enabled') else 'вќЊ disabled'}",
             f"**TTS Voice:** `{s.get('tts_voice', TTS_VOICE)}`",
             f"**TTS Rate:** `{s.get('tts_rate', TTS_RATE)}`",
             "",
             "**Commands:**",
-            "• `/theme` — cycle visual theme",
-            "• `/provider qwen|claude` — switch chat LLM",
-            "• `/voice on|off` — toggle voiceover",
-            "• `/quality -ql|-qm|-qh` — set render quality",
-            "• `/reset` — revert to defaults",
+            "вЂў `/theme` вЂ” cycle visual theme",
+            "вЂў `/provider qwen|claude` вЂ” switch chat LLM",
+            "вЂў `/voice on|off` вЂ” toggle voiceover",
+            "вЂў `/quality -ql|-qm|-qh` вЂ” set render quality",
+            "вЂў `/reset` вЂ” revert to defaults",
         ]
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"Settings error: {e}")
-        await _safe_reply(message, f"⚠️ Couldn't load settings: {e}")
+        await _safe_reply(message, f"вљ пёЏ Couldn't load settings: {e}")
 
 
 @dp.message(Command("voice"))
@@ -719,10 +775,10 @@ async def cmd_voice(message: types.Message) -> None:
     args = (message.text or "").replace("/voice", "", 1).strip().lower()
     if args in ("on", "1", "yes", "true"):
         user_settings.set(message.chat.id, "voiceover_enabled", True)
-        await _safe_reply(message, "🔊 Voiceover **enabled**")
+        await _safe_reply(message, "рџ”Љ Voiceover **enabled**")
     elif args in ("off", "0", "no", "false"):
         user_settings.set(message.chat.id, "voiceover_enabled", False)
-        await _safe_reply(message, "🔇 Voiceover **disabled**")
+        await _safe_reply(message, "рџ”‡ Voiceover **disabled**")
     else:
         current = user_settings.get(message.chat.id, "voiceover_enabled")
         await _safe_reply(message, f"Voiceover is currently {'**enabled**' if current else '**disabled**'}.\n\nUsage: `/voice on` or `/voice off`")
@@ -732,13 +788,13 @@ async def cmd_voice(message: types.Message) -> None:
 async def cmd_quality(message: types.Message) -> None:
     """Set render quality."""
     args = (message.text or "").replace("/quality", "", 1).strip()
-    valid = {"-l": "⚡ Preview", "-ql": "🚀 Fast", "-qm": "✅ Standard", "-qh": "🎬 High"}
+    valid = {"-l": "вљЎ Preview", "-ql": "рџљЂ Fast", "-qm": "вњ… Standard", "-qh": "рџЋ¬ High"}
     if args in valid:
         user_settings.set(message.chat.id, "quality", args)
         await _safe_reply(message, f"Quality set to **{valid[args]}** (`{args}`)")
     else:
         await _safe_reply(message, "Usage: `/quality -ql` or `-qm` or `-qh`\n\n" +
-                          "\n".join(f"  `{k}` — {v}" for k, v in valid.items()))
+                          "\n".join(f"  `{k}` вЂ” {v}" for k, v in valid.items()))
 
 
 @dp.message(Command("provider"))
@@ -749,16 +805,16 @@ async def cmd_provider_cmd(message: types.Message) -> None:
     current = user_settings.get(chat_id, "provider")
     if args in ("claude", "opus"):
         user_settings.set(chat_id, "provider", "claude")
-        await _safe_reply(message, "🧠 Your LLM switched to **Claude Opus 4.8**")
+        await _safe_reply(message, "рџ§  Your LLM switched to **Claude Opus 4.8**")
     elif args in ("qwen", "qwen3"):
         user_settings.set(chat_id, "provider", "qwen")
-        await _safe_reply(message, "🧠 Your LLM switched to **Qwen 3.6 Plus**")
+        await _safe_reply(message, "рџ§  Your LLM switched to **Qwen 3.6 Plus**")
     else:
         await _safe_reply(message,
             f"Your current LLM: **{current.upper()}**\n\n"
             f"Usage: `/provider qwen` or `/provider claude`\n\n"
-            f"• `qwen` — Qwen 3.6 Plus (fast, DashScope)\n"
-            f"• `claude` — Claude Opus 4.8 (high reasoning, Anthropic)"
+            f"вЂў `qwen` вЂ” Qwen 3.6 Plus (fast, DashScope)\n"
+            f"вЂў `claude` вЂ” Claude Opus 4.8 (high reasoning, Anthropic)"
         )
 
 
@@ -766,21 +822,21 @@ async def cmd_provider_cmd(message: types.Message) -> None:
 async def cmd_reset(message: types.Message) -> None:
     """Reset per-user settings to defaults."""
     user_settings.reset(message.chat.id)
-    await _safe_reply(message, "⚙️ Settings reset to defaults.")
+    await _safe_reply(message, "вљ™пёЏ Settings reset to defaults.")
 
 
 @dp.message(Command("examples"))
 async def cmd_examples(message: types.Message) -> None:
     """Show example animation prompts."""
     examples = get_all_examples()
-    lines = ["📚 **Example Animations**\n"]
+    lines = ["рџ“љ **Example Animations**\n"]
     current_cat = None
     for i, ex in enumerate(examples):
         if ex.get("category") != current_cat:
             current_cat = ex.get("category")
             lines.append(f"\n**{current_cat}:**")
-        dim = "🎲" if ex.get("is_3d") else "📐"
-        lines.append(f"  {i+1}. {dim} **{ex['name']}** — _{ex.get('description', '')}_")
+        dim = "рџЋІ" if ex.get("is_3d") else "рџ“ђ"
+        lines.append(f"  {i+1}. {dim} **{ex['name']}** вЂ” _{ex.get('description', '')}_")
 
     lines.append(f"\n_Run `/example 1` or send me any prompt for a polished Visual Math render._")
     await _safe_reply(message, "\n".join(lines))
@@ -796,10 +852,10 @@ async def cmd_example(message: types.Message) -> None:
 
     example = get_example_by_index(int(args) - 1)
     if not example:
-        await _safe_reply(message, "📭 Example not found. Use `/examples` to see available demos.")
+        await _safe_reply(message, "рџ“­ Example not found. Use `/examples` to see available demos.")
         return
 
-    await _safe_reply(message, f"📐 Rendering **{example['name']}** in Visual Math style…")
+    await _safe_reply(message, f"рџ“ђ Rendering **{example['name']}** in Visual Math styleвЂ¦")
     await _send_animation(
         message,
         example["prompt"],
@@ -814,16 +870,16 @@ async def cmd_cancel(message: types.Message) -> None:
     task = render_queue.get_user_task(message.chat.id)
     if task:
         if task.cancel():
-            await _safe_reply(message, f"❌ Cancelled: `{task.prompt[:50]}…`")
+            await _safe_reply(message, f"вќЊ Cancelled: `{task.prompt[:50]}вЂ¦`")
             analytics.log_render_cancelled(message.chat.id)
         else:
-            await _safe_reply(message, "⚠️ Could not cancel task.")
+            await _safe_reply(message, "вљ пёЏ Could not cancel task.")
     else:
-        await _safe_reply(message, "📭 No active render task.")
+        await _safe_reply(message, "рџ“­ No active render task.")
 
 
 # ---------------------------------------------------------------------------
-# Handlers — WebApp Data (Settings)
+# Handlers вЂ” WebApp Data (Settings)
 # ---------------------------------------------------------------------------
 
 @dp.message(F.web_app_data)
@@ -871,24 +927,24 @@ async def handle_webapp_data(message: types.Message) -> None:
 
         if updates:
             user_settings.set_many(chat_id, updates)
-            await _safe_reply(message, f"✅ Settings updated: {', '.join(updates.keys())}")
+            await _safe_reply(message, f"вњ… Settings updated: {', '.join(updates.keys())}")
         else:
-            await _safe_reply(message, "⚠️ No valid settings found in data.")
+            await _safe_reply(message, "вљ пёЏ No valid settings found in data.")
 
     except json.JSONDecodeError:
-        await _safe_reply(message, "⚠️ Invalid settings data format.")
+        await _safe_reply(message, "вљ пёЏ Invalid settings data format.")
     except Exception as e:
         logger.error(f"WebApp handler error: {e}", exc_info=True)
-        await _safe_reply(message, f"⚠️ Couldn't save settings: {e}")
+        await _safe_reply(message, f"вљ пёЏ Couldn't save settings: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Handlers — Photo (Vision)
+# Handlers вЂ” Photo (Vision)
 # ---------------------------------------------------------------------------
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message) -> None:
-    """Photo handler → Qwen vision (multimodal)."""
+    """Photo handler в†’ Qwen vision (multimodal)."""
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
         photo = message.photo[-1]
@@ -902,19 +958,19 @@ async def handle_photo(message: types.Message) -> None:
         await _safe_reply(message, response)
     except TelegramBadRequest as e:
         logger.error(f"Photo handler Telegram error: {e}")
-        await _safe_reply(message, f"⚠️ Couldn't process image: {e}")
+        await _safe_reply(message, f"вљ пёЏ Couldn't process image: {e}")
     except Exception as e:
         logger.error(f"Photo handler error: {e}")
-        await _safe_reply(message, "🖼️ Vision temporarily unavailable. Please try again later.")
+        await _safe_reply(message, "рџ–јпёЏ Vision temporarily unavailable. Please try again later.")
 
 
 # ---------------------------------------------------------------------------
-# Handlers — Text (Intent Router)
+# Handlers вЂ” Text (Intent Router)
 # ---------------------------------------------------------------------------
 
 @dp.message(F.text)
 async def handle_text(message: types.Message) -> None:
-    """Main text router: intent classification → ANIMATE or CHAT."""
+    """Main text router: intent classification в†’ ANIMATE or CHAT."""
     text = message.text.strip()
     if not text:
         return
@@ -946,7 +1002,7 @@ async def handle_text(message: types.Message) -> None:
             await _safe_reply(message, response)
         except Exception as e:
             logger.error(f"Chat handler error: {e}")
-            await _safe_reply(message, f"⚠️ Chat temporarily unavailable: {e}")
+            await _safe_reply(message, f"вљ пёЏ Chat temporarily unavailable: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -955,8 +1011,15 @@ async def handle_text(message: types.Message) -> None:
 
 async def _analytics_flush_loop():
     """Persist analytics to disk every 5 minutes."""
-    while True:
-        await asyncio.sleep(300)
+    try:
+        while True:
+            await asyncio.sleep(300)
+            try:
+                analytics.flush()
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        # Final flush on shutdown
         try:
             analytics.flush()
         except Exception:
@@ -965,12 +1028,12 @@ async def _analytics_flush_loop():
 
 async def main() -> None:
     await d1.init()
-    logger.info("Starting Manim Animation Bot + AI Assistant…")
+    logger.info("Starting Manim Animation Bot + AI AssistantвЂ¦")
     logger.info(f"Qwen 3.7 Max: {GPT_MODEL} (reasoning: {GPT_REASONING_EFFORT})")
     logger.info(f"Chat:    {CHAT_MODEL}")
     logger.info(f"Cloud:   D1 {'enabled' if D1_ENABLED else 'disabled (graceful fallback)'}")
     logger.info(f"TTS:     {'enabled' if VOICEOVER_ENABLED else 'disabled'} ({TTS_VOICE})")
-    logger.info("Polling started — waiting for messages")
+    logger.info("Polling started вЂ” waiting for messages")
 
     # Start analytics flusher as background task
     asyncio.create_task(_analytics_flush_loop())
