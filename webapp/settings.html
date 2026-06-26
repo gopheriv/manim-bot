@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Manim Bot Settings</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #1a1a2e);
+    --text: var(--tg-theme-text-color, #eee);
+    --hint: var(--tg-theme-hint-color, #888);
+    --accent: var(--tg-theme-button-color, #6c63ff);
+    --card: var(--tg-theme-secondary-bg-color, #16213e);
+    --divider: rgba(255,255,255,0.08);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 16px;
+    min-height: 100vh;
+  }
+  h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 20px;
+    text-align: center;
+    opacity: 0.9;
+  }
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--hint);
+    margin-bottom: 12px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--divider);
+  }
+  .row:last-child { border-bottom: none; }
+  .row label {
+    font-size: 15px;
+    font-weight: 500;
+  }
+  .row .sub {
+    font-size: 12px;
+    color: var(--hint);
+    margin-top: 2px;
+  }
+  /* Toggle switch */
+  .switch {
+    position: relative;
+    width: 48px;
+    height: 28px;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: #444;
+    border-radius: 28px;
+    transition: 0.3s;
+  }
+  .slider::before {
+    content: '';
+    position: absolute;
+    width: 22px; height: 22px;
+    left: 3px; bottom: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: 0.3s;
+  }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(20px); }
+
+  /* Select */
+  select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--divider);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+    width: 100%;
+    margin-top: 8px;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+
+  /* Range slider */
+  .range-wrap {
+    margin-top: 8px;
+  }
+  .range-wrap input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    height: 6px;
+  }
+  .range-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--hint);
+    margin-top: 4px;
+  }
+  .range-value {
+    text-align: center;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+
+  .btn-reset {
+    display: block;
+    width: 100%;
+    margin-top: 16px;
+    padding: 12px;
+    background: transparent;
+    color: #ff6b6b;
+    border: 1px solid #ff6b6b;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-reset:active { background: rgba(255,107,107,0.15); }
+</style>
+</head>
+<body>
+
+<h2>⚙️ Manim Bot Settings</h2>
+
+<!-- Voiceover toggle -->
+<div class="card">
+  <div class="card-title">Voiceover</div>
+  <div class="row">
+    <div>
+      <label>Enable Narration</label>
+      <div class="sub">AI-generated voice explains the animation</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="voiceover_enabled" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<!-- Voice selection -->
+<div class="card">
+  <div class="card-title">Voice</div>
+  <div class="row" style="flex-direction: column; align-items: stretch;">
+    <label>Narrator Voice</label>
+    <select id="tts_voice">
+      <option value="en-US-ChristopherNeural">Christopher (US, Male)</option>
+      <option value="en-US-JennyNeural">Jenny (US, Female)</option>
+      <option value="en-US-AriaNeural">Aria (US, Female)</option>
+      <option value="en-US-GuyNeural">Guy (US, Male)</option>
+      <option value="en-US-DavisNeural">Davis (US, Male)</option>
+      <option value="en-US-TonyNeural">Tony (US, Male)</option>
+      <option value="en-GB-RyanNeural">Ryan (UK, Male)</option>
+      <option value="en-GB-SoniaNeural">Sonia (UK, Female)</option>
+      <option value="en-AU-WilliamNeural">William (AU, Male)</option>
+      <option value="en-AU-NatashaNeural">Natasha (AU, Female)</option>
+    </select>
+  </div>
+</div>
+
+<!-- Speed slider -->
+<div class="card">
+  <div class="card-title">Speech Speed</div>
+  <div class="row" style="flex-direction: column; align-items: stretch;">
+    <div class="range-value" id="rate_display">1.0×</div>
+    <div class="range-wrap">
+      <input type="range" id="tts_rate" min="50" max="200" value="100" step="5">
+      <div class="range-label">
+        <span>0.5× Slow</span>
+        <span>1.0×</span>
+        <span>2.0× Fast</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<button class="btn-reset" id="reset_btn">↩️ Reset to Defaults</button>
+
+<script>
+  const tg = window.Telegram.WebApp;
+  tg.expand();
+  tg.ready();
+
+  // Parse init params from Telegram
+  const params = new URLSearchParams(tg.initDataUnsafe?.start_param || tg.initData || '');
+
+  // Try to load current settings from start_param (JSON-encoded)
+  let current = {};
+  try {
+    const sp = tg.initDataUnsafe?.start_param;
+    if (sp) current = JSON.parse(atob(sp));
+  } catch(e) {}
+
+  const voToggle = document.getElementById('voiceover_enabled');
+  const voiceSelect = document.getElementById('tts_voice');
+  const rateSlider = document.getElementById('tts_rate');
+  const rateDisplay = document.getElementById('rate_display');
+
+  // Apply current settings
+  if (current.voiceover_enabled !== undefined)
+    voToggle.checked = current.voiceover_enabled;
+  if (current.tts_voice)
+    voiceSelect.value = current.tts_voice;
+  if (current.tts_rate) {
+    // Convert "+25%" → 125, "-50%" → 50, "+0%" → 100
+    const pct = parseInt(current.tts_rate) || 0;
+    rateSlider.value = 100 + pct;
+    rateDisplay.textContent = ((100 + pct) / 100).toFixed(1) + '×';
+  }
+
+  // Update rate display on slider change
+  rateSlider.addEventListener('input', () => {
+    const val = parseInt(rateSlider.value);
+    rateDisplay.textContent = (val / 100).toFixed(1) + '×';
+  });
+
+  // Send data to bot on any change
+  function sendSettings() {
+    const pct = parseInt(rateSlider.value) - 100;
+    const rateStr = (pct >= 0 ? '+' : '') + pct + '%';
+
+    const data = {
+      voiceover_enabled: voToggle.checked,
+      tts_voice: voiceSelect.value,
+      tts_rate: rateStr,
+    };
+
+    tg.sendData(JSON.stringify(data));
+  }
+
+  // Auto-send on change
+  voToggle.addEventListener('change', sendSettings);
+  voiceSelect.addEventListener('change', sendSettings);
+  rateSlider.addEventListener('change', sendSettings);
+
+  // Reset button
+  document.getElementById('reset_btn').addEventListener('click', () => {
+    tg.sendData(JSON.stringify({ reset: true }));
+  });
+
+  // Enable MainButton as "Save" alternative
+  tg.MainButton.setText('💾 Save Settings');
+  tg.MainButton.show();
+  tg.MainButton.onClick(sendSettings);
+</script>
+
+</body>
+</html>

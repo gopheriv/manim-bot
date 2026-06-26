@@ -1,0 +1,42 @@
+[Unit]
+Description=Manim Animation Bot + AI Assistant
+Documentation=https://github.com/ManimCommunity/manim
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/manim-bot
+
+# Python virtual environment
+ExecStart=/opt/manim-bot/venv/bin/python3 bot.py
+
+# Auto-restart (replaces Python watchdog)
+Restart=always
+RestartSec=5
+RestartForceExitStatus=SIGTERM SIGKILL SIGABRT
+
+# Resource limits
+MemoryMax=16G
+MemoryHigh=12G
+CPUQuota=200%
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/manim-bot/logs /opt/manim-bot/data /opt/manim-bot/tmp /tmp/manim_render
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=manim-bot
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/manim-bot/.env
+
+[Install]
+WantedBy=multi-user.target

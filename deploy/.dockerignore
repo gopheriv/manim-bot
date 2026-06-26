@@ -1,0 +1,24 @@
+# Build context excludes
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.pytest_cache/
+media/
+logs/
+tmp/
+temp_frames/
+*.log
+.local_cache.db
+
+# Deploy files (used on server, not in build context)
+deploy/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

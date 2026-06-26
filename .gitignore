@@ -1,0 +1,38 @@
+# Secrets
+.env
+.env.*
+!.env.example
+deploy/.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Runtime data
+data/*.db
+logs/*.log
+tmp/
+temp_frames/
+
+# Local D1 fallback
+.local_cache.db
+
+# User settings (contains personal preferences)
+user_settings.json
+
+# OS
+.DS_Store
+Thumbs.db

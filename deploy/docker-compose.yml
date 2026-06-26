@@ -1,0 +1,53 @@
+# Manim Bot — Docker Compose
+# Usage:
+#   1. Copy .env.production to .env and fill in secrets
+#   2. docker compose up -d
+#   3. docker compose logs -f
+
+services:
+  manim-bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: manim-bot
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RENDER_DIR=/tmp/manim_render
+      - MEMORY_THRESHOLD_PCT=85
+      - MAX_CONCURRENT_RENDERS=2
+    volumes:
+      # Persistent data
+      - manim-data:/opt/manim-bot/data
+      - manim-logs:/opt/manim-bot/logs
+      # Render temp files (tmpfs for speed)
+      - manim-render:/tmp/manim_render
+    # Resource limits (adjust based on server)
+    deploy:
+      resources:
+        limits:
+          memory: 12G
+          cpus: "2.0"
+        reservations:
+          memory: 4G
+          cpus: "1.0"
+    # Health check
+    healthcheck:
+      test: ["CMD", "python3", "-c", "print('healthy')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  manim-data:
+  manim-logs:
+  manim-render:
+    driver: local
