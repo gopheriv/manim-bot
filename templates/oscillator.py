@@ -7,15 +7,15 @@ from templates.base import SceneTemplate, TemplateConfig, _common_manim_header, 
 
 class DampedOscillatorTemplate(SceneTemplate):
     """Damped harmonic oscillator with phase space diagram."""
-    name = "damped_oscillato"
+    name = "damped_oscillator"
     keywords = ["damp", "oscillat", "harmonic", "spring", "pendulum", "bounce", "vibrat", "wave", "frequency"]
-    category = "oscillato"
+    category = "oscillator"
 
     def generate_code(self, config: TemplateConfig) -> str:
         damping = config.damping
         freq = config.frequency
         color = config.colors[0]
-        title = config.title or "Damped Harmonic Oscillato"
+        title = config.title or "Damped Harmonic Oscillator"
         equation = config.equation or r"x'' + 2\zeta\omega x' + \omega^2 x = 0"
         dur = min(config.duration, 15)  # cap at 15s for safety
 
@@ -90,9 +90,9 @@ self.wait(1.5)
 
 class DrivenOscillatorTemplate(SceneTemplate):
     """Driven oscillator with resonance."""
-    name = "driven_oscillato"
+    name = "driven_oscillator"
     keywords = ["driven", "resonance", "force", "push", "external", "steady"]
-    category = "oscillato"
+    category = "oscillator"
 
     def generate_code(self, config: TemplateConfig) -> str:
         freq = config.frequency

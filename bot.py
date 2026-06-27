@@ -587,6 +587,7 @@ async def _send_animation(
                 progress_cb=_on_manim_progress,
             )
 
+            render_start = datetime.now()
             if user_voiceover and VOICEOVER_ENABLED:
                 # Launch both in parallel — saves ~15-30s
                 render_task = asyncio.create_task(render_coro)
@@ -633,7 +634,7 @@ async def _send_animation(
                         await _safe_reply(message, f"рџ”§ Render failed, asking Qwen 3.7 Max to fix the code (attempt {heal_attempt})вЂ¦")
 
                         try:
-                            fixed_code = await fix_manim_code(prompt, error_msg, theme_prompt)
+                            fixed_code = await fix_manim_code(prompt, error_msg, theme_prompt, original_code=code)
                             if fixed_code and fixed_code.strip():
                                 fixed_code = strip_code_fences(fixed_code)
                                 video_path = await render(

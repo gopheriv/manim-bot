@@ -66,7 +66,14 @@ async def add_watermark(video_path: Path, output_dir: Path | None = None) -> Pat
 
     except asyncio.TimeoutError:
         logger.error("Watermark ffmpeg timed out — killing process")
-        proc.kill()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await proc.wait()
+        except Exception:
+            pass
         return None
     except Exception:
         logger.error("Watermark failed", exc_info=True)

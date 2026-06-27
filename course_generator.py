@@ -99,4 +99,4 @@ async def generate_course(topic: str) -> Course:
 
     except Exception as e:
         logger.error(f"Course generation failed: {e}")
-        raise
+        return Course(topic=topic_name, lessons=[])

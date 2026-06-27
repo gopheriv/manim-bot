@@ -140,6 +140,8 @@ def build_theme_prompt(theme: Theme) -> str:
         f"Background color MUST be set to {theme.bg_color}.",
         theme.palette_desc,
     ]
+    if theme.post_effects:
+        parts.append(f"Apply post-processing effects: {theme.post_effects}")
     if theme.extra_instructions:
         parts.append(theme.extra_instructions)
     return "\n".join(parts)

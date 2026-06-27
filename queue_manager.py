@@ -152,10 +152,24 @@ class RenderQueue:
                 age = (now - task.completed_at).total_seconds() / 3600
                 if age > max_age_hours:
                     to_remove.append(task_id)
-        
+
         for task_id in to_remove:
             del self.tasks[task_id]
-        
+
+        # Drain stale task IDs from the queue that no longer exist in self.tasks
+        drained = 0
+        while not self.queue.empty():
+            try:
+                task_id = self.queue.get_nowait()
+                if task_id in self.tasks:
+                    self.queue.put_nowait(task_id)  # Re-queue valid task
+                else:
+                    drained += 1  # Skip deleted task
+            except Exception:
+                break
+        if drained:
+            logger.info(f"Drained {drained} stale IDs from queue during cleanup")
+
         if to_remove:
             logger.info(f"Cleaned up {len(to_remove)} old tasks")
 

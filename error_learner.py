@@ -94,6 +94,12 @@ def get_adaptive_prompt_modifiers() -> str:
     if not data:
         return ""
 
+    # Prune expired entries before counting
+    cutoff = datetime.now() - timedelta(days=PATTERN_TTL_DAYS)
+    data = [p for p in data if datetime.fromisoformat(p["timestamp"]) > cutoff]
+    if not data:
+        return ""
+
     # Count error categories
     counter = Counter(p["category"] for p in data)
 

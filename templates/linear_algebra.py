@@ -13,17 +13,14 @@ class EigenvaluesTemplate(SceneTemplate):
 
     def generate_code(self, config: TemplateConfig) -> str:
         color = config.colors[0]
+        a11 = config.extra_params.get('a11', 2)
+        a12 = config.extra_params.get('a12', 1)
+        a21 = config.extra_params.get('a21', 1)
+        a22 = config.extra_params.get('a22', 3)
         return _common_manim_header() + _indent(f"""
 title = Text("Eigenvalues & Eigenvectors", font_size=36, color="{color}")
 title.to_edge(UP)
-# Matrix
-A = {{
-    {config.extra_params.get('a11', 2)}: float,
-    {config.extra_params.get('a12', 1)}: float,
-    {config.extra_params.get('a21', 1)}: float,
-    {config.extra_params.get('a22', 3)}: float,
-}}
-matrix_tex = MathTex(r"A = \\\\begin{{pmatrix}} 2 & 1 \\\\ 1 & 3 \\\\end{{pmatrix}}", font_size=32, color=WHITE)
+matrix_tex = MathTex(r"A = \\begin{{pmatrix}} {a11} & {a12} \\\\ {a21} & {a22} \\end{{pmatrix}}", font_size=32, color=WHITE)
 matrix_tex.to_edge(UP, buff=1)
 self.play(Write(title, run_time=1.5), Write(matrix_tex, run_time=1.5))
 
@@ -53,7 +50,7 @@ self.play(Create(eigen_arrows), Write(eigen_labels), run_time=1.5)
 # Apply transformation
 def transform_point(p):
     x, y = p[0], p[1]
-    return np.array([2*x + y, x + 3*y, 0])
+    return np.array([{a11}*x + {a12}*y, {a21}*x + {a22}*y, 0])
 
 # Animate the transform
 transformed_circle = circle.copy()

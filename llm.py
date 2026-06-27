@@ -104,14 +104,15 @@ async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_p
         raise
 
 
-async def fix_manim_code(original_prompt: str, error: str, theme_instructions: str = "") -> str:
+async def fix_manim_code(original_prompt: str, error: str, theme_instructions: str = "", original_code: str = "") -> str:
     """Fix broken Manim code with GPT-5.5."""
     try:
+        code_context = f"\n\nBroken code:\n```python\n{original_code[:3000]}\n```" if original_code else ""
         kwargs: dict[str, Any] = {
             "model": GPT_MODEL,
             "messages": [
                 {"role": "system", "content": build_manim_fix_prompt(error, theme_instructions, original_prompt)},
-                {"role": "user", "content": f"Original request: {original_prompt}"},
+                {"role": "user", "content": f"Original request: {original_prompt}{code_context}\n\nFix the error: {error}"},
             ],
             "max_tokens": 8192,
         }

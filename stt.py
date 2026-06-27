@@ -10,6 +10,9 @@ import asyncio
 import logging
 from pathlib import Path
 
+import imageio_ffmpeg
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -36,7 +39,7 @@ async def transcribe_voice(ogg_path: Path) -> str | None:
         # Convert OGG Opus → WAV for speech_recognition
         wav_path = ogg_path.with_suffix(".wav")
         cmd = [
-            "ffmpeg", "-y",
+            FFMPEG, "-y",
             "-i", str(ogg_path),
             "-acodec", "pcm_s16le",
             "-ar", "16000",
