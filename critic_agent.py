@@ -80,7 +80,7 @@ async def critique_code(manim_code: str, original_prompt: str) -> CriticReview:
     """Score Manim code on 6 dimensions and return critique.
 
     Args:
-        maniam_code: The generated Manim Python code.
+        manim_code: The generated Manim Python code.
         original_prompt: User's original animation request.
 
     Returns:
@@ -88,7 +88,7 @@ async def critique_code(manim_code: str, original_prompt: str) -> CriticReview:
     """
     try:
         # Truncate very long code to stay within token limits
-        code_snippet = maniam_code[:4000] if len(manim_code) > 4000 else maniam_code
+        code_snippet = manim_code[:4000] if len(manim_code) > 4000 else manim_code
 
         response = await qwen_client.chat.completions.create(
             model=CHAT_MODEL,

@@ -171,7 +171,14 @@ async def judge_code(
             timeout=JUDGE_TIMEOUT,
         )
 
-        content = (response.choices[0].message.content or "").strip()
+        # MiniMax via iamhc.cn may return raw string or ChatCompletion object
+        if isinstance(response, str):
+            content = response.strip()
+        elif hasattr(response, "choices"):
+            content = (response.choices[0].message.content or "").strip()
+        else:
+            # Fallback: try to get content from response dict
+            content = (response.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
         # Strip markdown fences if present
         content = re.sub(r"^```[a-z]*\n?", "", content, flags=re.MULTILINE)
         content = re.sub(r"\n?```$", "", content, flags=re.MULTILINE)

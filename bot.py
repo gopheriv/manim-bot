@@ -309,6 +309,7 @@ async def _send_animation(
             # ── TEMPLATE MATCHING: try fast path before full code gen ──
             template_match = get_registry().match(prompt)
             code: str = ""
+            theme_prompt: str = ""  # Always defined — empty for templates, built for LLM path
 
             if template_match:
                 # Fast path: LLM fills small JSON config → template generates code
