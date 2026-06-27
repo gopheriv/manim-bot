@@ -203,16 +203,25 @@ self.wait(2.0)
 ```
 """
 
-def get_tiktok_prompt(user_request: str) -> str:
-    """Generate TikTok-optimized prompt from user request."""
-    from prompt_builder import BASE_MANIM_RULES, SCENE_AWARENESS
+def get_tiktok_prompt(user_request: str, theme_instructions: str = "") -> str:
+    """Generate TikTok-optimized prompt from user request.
+
+    Now includes the active render tier's PERFORMANCE BUDGET (so vertical videos
+    can't silently exceed hardware limits) and the theme palette (so they match
+    the house visual style), in addition to the TikTok format rules.
+    """
+    from prompt_builder import BASE_MANIM_RULES, SCENE_AWARENESS, budget_block
+
+    theme_block = f"\n{theme_instructions}\n" if theme_instructions else ""
 
     return f"""{BASE_MANIM_RULES}
 
 {TIKTOK_FORMAT_RULES}
 
-{SCENE_AWARENESS}
+{budget_block()}
 
+{SCENE_AWARENESS}
+{theme_block}
 ## User Request
 {user_request}
 
@@ -222,6 +231,7 @@ def get_tiktok_prompt(user_request: str) -> str:
 - Follow the 5-part structure: Hook → Context → Explanation → Insight → CTA
 - Keep total duration 25-30 seconds
 - Use vertical-optimized layout: title at top, visual in center, text at bottom
+- Use the theme's color palette above for visual consistency
 
 Generate the complete Manim scene code now.
 """

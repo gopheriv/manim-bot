@@ -1,4 +1,4 @@
-﻿"""Manim Animation Bot вЂ” Telegram bot with Qwen 3.7 Max code gen, Qwen 3.6 chat,
+"""Manim Animation Bot — Telegram bot with Qwen 3.7 Max code gen, Qwen 3.6 chat,
 edge-tts voiceover, themes, queue management, rate limiting, and D1 caching."""
 
 import asyncio
@@ -29,16 +29,21 @@ from config import (
     MANIM_QUALITY,
     MANIM_TIMEOUT,
     MANIM_MAX_RETRIES,
+    REVIEW_REPAIR_ENABLED,
+    CRITIC_REPAIR_THRESHOLD,
+    VISUAL_CRITIC_ENABLED,
+    VISUAL_CRITIC_MAX_PASSES,
 )
 from database import db
 from fallback_scene import build_fallback_scene
-from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, generate_scene_plan, repair_layout, strip_code_fences, fill_template_config
+from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, generate_scene_plan, repair_layout, repair_targeted, edit_manim_code, strip_code_fences, fill_template_config
 from scene_planner import parse_scene_plan, format_plan_for_prompt
 from scene_validator import validate_layout, has_issues
 from markdown_utils import strip_markdown
 from queue_manager import render_queue, TaskStatus
 from rate_limiter import rate_limiter
 from renderer import render, cleanup, get_last_generated_code
+from render_tier import get_tier
 import settings as user_settings
 from themes import get_theme, next_theme, build_theme_prompt, THEME_ORDER
 from voiceover import add_voiceover
@@ -56,6 +61,7 @@ from course_generator import generate_course
 from exam_prep import get_question_bank, get_random_question, generate_animation_for_question
 from gallery import GALLERY_CATALOG, get_featured, get_by_category, get_by_id, search as gallery_search, increment_view, increment_render
 from multi_agent_debate import debate_generate
+from visual_critic import critique_render
 from referral import register_user, get_user_referral_info, get_referral_stats, use_bonus_render
 from teacher_dashboard import register_teacher, get_teacher_dashboard, get_engagement_stats
 
@@ -82,7 +88,7 @@ dp = Dispatcher()
 # ---------------------------------------------------------------------------
 
 async def _safe_reply(message: types.Message, text: str, **kwargs) -> None:
-    """Send a text reply with Markdown safety вЂ” falls back to plain text on parse errors."""
+    """Send a text reply with Markdown safety — falls back to plain text on parse errors."""
     try:
         await message.reply(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except TelegramBadRequest:
@@ -117,7 +123,7 @@ async def _cancel_task(task: asyncio.Task) -> None:
 
 
 async def _safe_edit(message: types.Message, text: str, **kwargs) -> None:
-    """Edit a message with Markdown safety вЂ” falls back to plain text on parse errors."""
+    """Edit a message with Markdown safety — falls back to plain text on parse errors."""
     try:
         await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except TelegramBadRequest:
@@ -131,7 +137,7 @@ async def _safe_edit(message: types.Message, text: str, **kwargs) -> None:
 def _build_progress_bar(pct: int, width: int = 20) -> str:
     """Build a filled progress bar string."""
     filled = pct * width // 100
-    return "в–€" * filled + "в–‘" * (width - filled)
+    return "█" * filled + "░" * (width - filled)
 
 
 # ---------------------------------------------------------------------------
@@ -169,34 +175,25 @@ def get_example_by_index(index: int) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _progress_loop(chat_id: int, render_task, narration_task: asyncio.Task | None, status_message: types.Message | None = None):
-    """Send periodic chat action updates while render/narration run in parallel.
-    If status_message is provided, also update the text with a progress bar.
+    """Send periodic chat-action spinner updates while render/narration run.
+
+    Note: this loop only sends the lightweight Telegram chat-action (the
+    "recording video…" indicator). It deliberately does NOT edit the status
+    message text — the renderer's progress callback (`_on_manim_progress`) is
+    the single owner of the status text, so the two never clobber each other.
     """
     actions = [
-        (ChatAction.RECORD_VIDEO, "рџЋ¬ Rendering animationвЂ¦"),
-        (ChatAction.RECORD_VIDEO, "рџЋЁ Drawing framesвЂ¦"),
-        (ChatAction.UPLOAD_VIDEO, "вЏі FinalizingвЂ¦"),
+        ChatAction.RECORD_VIDEO,
+        ChatAction.RECORD_VIDEO,
+        ChatAction.UPLOAD_VIDEO,
     ]
     idx = 0
-    start_time = asyncio.get_running_loop().time()
     try:
         while not (render_task.done() and (narration_task is None or narration_task.done())):
-            action, label = actions[idx % len(actions)]
             try:
-                await bot.send_chat_action(chat_id, action)
+                await bot.send_chat_action(chat_id, actions[idx % len(actions)])
             except Exception:
                 pass
-
-            # Update progress bar text every 30s
-            if status_message and idx % 2 == 0:
-                elapsed = int(asyncio.get_running_loop().time() - start_time)
-                mins, secs = divmod(elapsed, 60)
-                progress_bar = f"⏳ {mins}m {secs}s elapsed"
-                try:
-                    await status_message.edit_text(progress_bar, parse_mode=ParseMode.MARKDOWN)
-                except Exception:
-                    pass
-
             idx += 1
             await asyncio.sleep(15)
     except asyncio.CancelledError:
@@ -234,7 +231,7 @@ async def _classify_intent(text: str, chat_id: int) -> str:
 
     try:
         result = await classify_intent(cleaned, provider=user_settings.get(chat_id, "provider"))
-        logger.debug(f"LLM intent: '{cleaned}' в†’ {result}")
+        logger.debug(f"LLM intent: '{cleaned}' → {result}")
         return result
     except Exception as e:
         logger.warning(f"Intent classification failed, defaulting to CHAT: {e}")
@@ -252,9 +249,21 @@ async def _send_animation(
     quality: str | None = None,
     theme_name: str | None = None,
     tiktok_mode: bool = False,
+    skip_cache: bool = False,
+    edit_base_code: str = "",
+    edit_instruction: str = "",
 ) -> None:
-    """Full animation pipeline with queue, themes, self-healing, and caching."""
+    """Full animation pipeline with queue, themes, self-healing, and caching.
+
+    When ``edit_base_code`` is provided, the generation step starts from that
+    code and applies ``edit_instruction`` (edit-by-diff) instead of generating a
+    brand-new animation from scratch.
+    """
     chat_id = message.chat.id
+    original_prompt = prompt  # captured before any enhancement; used for the cache key
+    # Edits always bypass the cache so the user gets the modified version.
+    if edit_base_code:
+        skip_cache = True
 
     # TikTok mode detection (auto-detect if not explicitly set)
     if not tiktok_mode:
@@ -266,17 +275,21 @@ async def _send_animation(
     # Rate limiting
     allowed, retry_after = rate_limiter.check_rate_limit(chat_id, "animate")
     if not allowed:
-        await _safe_reply(message, f"вЏі Rate limit reached. Try again in {retry_after}s.")
+        await _safe_reply(message, f"⏳ Rate limit reached. Try again in {retry_after}s.")
         return
 
     # Check for existing task
     existing = render_queue.get_user_task(chat_id)
     if existing:
-        await _safe_reply(message, f"вЏі You already have a render in progress: `{existing.prompt[:50]}вЂ¦`")
+        await _safe_reply(message, f"⏳ You already have a render in progress: `{existing.prompt[:50]}…`")
         return
 
-    # Get user settings
-    user_quality = quality or user_settings.get(chat_id, "quality") or MANIM_QUALITY
+    # Get user settings. Quality precedence: explicit arg (e.g. /draft) >
+    # user's explicit /quality override > the active render tier's default.
+    # The tier default (e.g. 1080p on capable hardware) wins when the user has
+    # not deliberately chosen a quality.
+    tier = get_tier()
+    user_quality = quality or user_settings.get_override(chat_id, "quality") or tier.default_quality
     user_theme = theme_name or user_settings.get(chat_id, "theme") or "visual_math"
     user_voiceover = user_settings.get(chat_id, "voiceover_enabled")
     user_voice = user_settings.get(chat_id, "tts_voice") or TTS_VOICE
@@ -288,17 +301,24 @@ async def _send_animation(
     # Submit to queue
     task = await render_queue.submit_task(chat_id, prompt, is_3d=is_3d, quality=user_quality)
 
-    # D1 cache check
-    try:
-        cached_file_id = await d1.check_cache(chat_id, prompt)
-        if cached_file_id:
-            task.status = TaskStatus.COMPLETED
-            task.completed_at = datetime.now()
-            await message.reply_video(video=cached_file_id, caption="вљЎ Cached result")
-            logger.info(f"Animation done вЂ” chat_id={chat_id}, cache HIT")
-            return
-    except Exception as e:
-        logger.warning(f"Cache check failed (degraded): {e}")
+    # Cache key includes theme + quality + format so different variants don't
+    # collide (same prompt, different look = different cache entry). Built from
+    # the original prompt so the check (here) and save (later) always agree even
+    # after prompt enhancement rewrites `prompt`.
+    cache_key = f"{original_prompt}|theme={user_theme}|q={user_quality}|tt={int(bool(tiktok_mode))}"
+
+    # D1 cache check (skipped for edits so the user always gets the modified version)
+    if not skip_cache:
+        try:
+            cached_file_id = await d1.check_cache(chat_id, cache_key)
+            if cached_file_id:
+                task.status = TaskStatus.COMPLETED
+                task.completed_at = datetime.now()
+                await message.reply_video(video=cached_file_id, caption="⚡ Cached result")
+                logger.info(f"Animation done — chat_id={chat_id}, cache HIT")
+                return
+        except Exception as e:
+            logger.warning(f"Cache check failed (degraded): {e}")
 
     # Acquire semaphore (blocks if another render is running)
     async with render_queue.semaphore:
@@ -306,10 +326,31 @@ async def _send_animation(
         task.started_at = datetime.now()
 
         try:
-            # ── TEMPLATE MATCHING: try fast path before full code gen ──
-            template_match = get_registry().match(prompt)
             code: str = ""
             theme_prompt: str = ""  # Always defined — empty for templates, built for LLM path
+            scene_plan_json: str = ""  # Always defined — empty for templates, built for LLM path
+
+            # ── EDIT-BY-DIFF: start from the prior code and apply the change ──
+            if edit_base_code:
+                theme_prompt = (
+                    get_tiktok_prompt(prompt, theme_instructions=build_theme_prompt(theme))
+                    if tiktok_mode else build_theme_prompt(theme)
+                )
+                await _safe_reply(message, "✏️ Applying your change to the previous animation…")
+                try:
+                    edited = strip_code_fences(
+                        await edit_manim_code(edit_base_code, edit_instruction, theme_prompt, prompt)
+                    )
+                    if "class GenScene" in edited and "def construct" in edited:
+                        code = edited
+                        logger.info("Edit-by-diff applied (%d → %d chars)", len(edit_base_code), len(code))
+                    else:
+                        logger.warning("Edit-by-diff produced invalid structure; falling back to full generation")
+                except Exception as e:
+                    logger.warning(f"Edit-by-diff failed ({e}); falling back to full generation")
+
+            # ── TEMPLATE MATCHING: try fast path before full code gen ──
+            template_match = get_registry().match(prompt) if not code else None
 
             if template_match:
                 # Fast path: LLM fills small JSON config → template generates code
@@ -327,11 +368,21 @@ async def _send_animation(
                     for key, val in config_dict.items():
                         if hasattr(config, key):
                             setattr(config, key, val)
+                    # Style unification: deterministic templates must follow the
+                    # active theme, not a fixed cyan/green/purple palette.
+                    if getattr(theme, "colors", None):
+                        config.colors = list(theme.colors[:3])
                     # Generate code from template (deterministic, no LLM)
                     code = template_match.template.generate_code(config)
+                    # Force the theme background even if the template hard-codes one.
+                    code = re.sub(
+                        r'self\.camera\.background_color\s*=\s*"[^"]*"',
+                        f'self.camera.background_color = "{theme.bg_color}"',
+                        code, count=1,
+                    )
                     logger.info(
-                        "Template %s generated code (%d chars) in config-fill mode",
-                        template_match.template.name, len(code),
+                        "Template %s generated code (%d chars) in config-fill mode, theme=%s",
+                        template_match.template.name, len(code), theme.name,
                     )
 
             if not code:
@@ -352,19 +403,19 @@ async def _send_animation(
 
                 # Build theme/format-specific prompt
                 if tiktok_mode:
-                    theme_prompt = get_tiktok_prompt(prompt)
+                    theme_prompt = get_tiktok_prompt(prompt, theme_instructions=build_theme_prompt(theme))
                 else:
                     theme_prompt = build_theme_prompt(theme)
 
-                # Add error pattern avoidance from recent failures
-                error_modifiers = get_adaptive_prompt_modifiers()
+                # Add error pattern avoidance from recent failures (the
+                # memory-pressure modifier only applies on the constrained tier)
+                error_modifiers = get_adaptive_prompt_modifiers(constrained=(tier.name == "constrained"))
                 if error_modifiers:
                     theme_prompt += error_modifiers
                     logger.info("Error pattern modifiers added to prompt")
 
                 # ── Scene Awareness: plan → generate → validate → repair ──
                 # Step 1: Generate scene composition plan (non-fatal on failure)
-                scene_plan_json: str = ""
                 try:
                     raw_plan = await generate_scene_plan(prompt)
                     plan = parse_scene_plan(raw_plan)
@@ -409,7 +460,7 @@ async def _send_animation(
                 for issue in layout_issues:
                     logger.debug(f"  Layout issue: {issue}")
 
-                # Step 4: Layout repair вЂ” fix ONLY spatial/timing, preserve creative metaphor
+                # Step 4: Layout repair — fix ONLY spatial/timing, preserve creative metaphor
                 try:
                     repaired = await repair_layout(code, layout_issues, theme_prompt, prompt)
                     if repaired and repaired.strip():
@@ -452,6 +503,39 @@ async def _send_animation(
             except Exception as e:
                 logger.warning(f"Education review failed (non-fatal): {e}")
                 edu_review = None
+
+            # ── Reviewer-driven repair: turn review FINDINGS into code changes ──
+            # Previously the critic/education scores were only logged; now a low
+            # critic score or an education-accuracy problem triggers ONE targeted
+            # repair before the render gate (concept preserved, bounded, non-fatal).
+            if REVIEW_REPAIR_ENABLED:
+                repair_issues: list[str] = []
+                focus_parts: list[str] = []
+                if edu_review and (not edu_review.is_correct or edu_review.issues):
+                    repair_issues.extend(edu_review.issues or ["Mathematical/conceptual inaccuracy detected."])
+                    focus_parts.append("mathematical accuracy")
+                if review and review.overall < CRITIC_REPAIR_THRESHOLD and review.issues:
+                    repair_issues.extend(review.issues)
+                    focus_parts.append("visual clarity and composition")
+                if repair_issues:
+                    logger.info(
+                        "Reviewer-repair triggered (%d issues, critic=%.1f) — applying targeted fix",
+                        len(repair_issues), (review.overall if review else -1.0),
+                    )
+                    try:
+                        fixed = await repair_targeted(
+                            code, repair_issues, prompt,
+                            theme_instructions=theme_prompt,
+                            focus=" and ".join(focus_parts) or "quality and correctness",
+                        )
+                        fixed = strip_code_fences(fixed)
+                        if "class GenScene" in fixed and "def construct" in fixed:
+                            code = fixed
+                            logger.info("Reviewer-repair applied")
+                        else:
+                            logger.warning("Reviewer-repair produced invalid structure — keeping original")
+                    except Exception as e:
+                        logger.warning(f"Reviewer-repair failed (non-fatal): {e}")
 
             # ── Judge of AI Court: code review with verdict (MiniMax M3) ──
             static_issues = static_checks.get("issues", []) if static_checks else []
@@ -530,7 +614,9 @@ async def _send_animation(
                     )
                     try:
                         code = await generate_manim_code(
-                            prompt + "\n\nAVOID: " + "; ".join(judge_review.critical_issues[:3])
+                            prompt + "\n\nAVOID: " + "; ".join(judge_review.critical_issues[:3]),
+                            theme_instructions=theme_prompt,
+                            scene_plan=scene_plan_json,
                         )
                         if "class GenScene" not in code or "def construct" not in code:
                             logger.warning("Regenerated code missing structure, trying layout repair")
@@ -553,11 +639,18 @@ async def _send_animation(
                         )
                         break
                 else:
-                    # Max iterations reached or unknown verdict — fail-safe
-                    if judge_review:
+                    # UNREVIEWED (judge unavailable) or max iterations reached.
+                    # Render either way, but be honest about which one happened.
+                    if judge_review and judge_review.verdict == JudgeVerdict.UNREVIEWED:
+                        logger.warning("Judge UNREVIEWED — rendering without correctness review")
                         await _safe_edit(
                             status_msg,
-                            "⚠️ *Judge max iterations reached*\n_Rendering as-is…"
+                            "⚠️ *Correctness review unavailable*\n_Rendering anyway…_"
+                        )
+                    elif judge_review:
+                        await _safe_edit(
+                            status_msg,
+                            "⚠️ *Judge max iterations reached*\n_Rendering as-is…_"
                         )
                     break
 
@@ -565,7 +658,7 @@ async def _send_animation(
             from renderer import _estimate_scene_weight
             weight = _estimate_scene_weight(code)
             if weight.is_heavy:
-                await _safe_edit(status_msg, "вљ пёЏ Heavy scene detected вЂ” auto-optimizing for your hardwareвЂ¦")
+                await _safe_edit(status_msg, "⚠️ Heavy scene detected — auto-optimizing for your hardware…")
                 await asyncio.sleep(0.5)  # Let user see the warning
             _render_progress = {"pct": 0, "anim": ""}
             _background_tasks: set[asyncio.Task] = set()
@@ -588,41 +681,26 @@ async def _send_animation(
             )
 
             render_start = datetime.now()
-            if user_voiceover and VOICEOVER_ENABLED:
-                # Launch both in parallel — saves ~15-30s
-                render_task = asyncio.create_task(render_coro)
-                narration_task = asyncio.create_task(_generate_narration(prompt))
-
-                # Periodic progress updates while waiting — edit bot's own message
-                progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, narration_task, status_msg))
-
-                try:
-                    video_path = await render_task
-                except asyncio.CancelledError:
-                    _cancel_task(progress_task)
-                    _cancel_task(narration_task)
-                    task.status = TaskStatus.CANCELLED
-                    raise
-                narration = await narration_task
-                _cancel_task(progress_task)
-            else:
-                # No voiceover — still show progress
-                render_task = asyncio.create_task(render_coro)
-                progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None, status_msg))
-                try:
-                    video_path = await render_task
-                except asyncio.CancelledError:
-                    _cancel_task(progress_task)
-                    task.status = TaskStatus.CANCELLED
-                    raise
-                _cancel_task(progress_task)
-                narration = None
+            # Render first. Narration is generated AFTER the render, from the
+            # final code, so the script can reference the actual visual beats
+            # (and so a self-heal/fallback that changes the code is reflected).
+            # Latency is not a concern here; correctness of sync is.
+            render_task = asyncio.create_task(render_coro)
+            progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None, status_msg))
+            try:
+                video_path = await render_task
+            except asyncio.CancelledError:
+                await _cancel_task(progress_task)
+                task.status = TaskStatus.CANCELLED
+                raise
+            await _cancel_task(progress_task)
+            narration = None  # generated later, from the final code
 
             # Check if user cancelled
             if task.is_cancelled():
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.now()
-                await _safe_reply(message, "вќЊ Render cancelled.")
+                await _safe_reply(message, "❌ Render cancelled.")
                 return
 
             # Self-healing: up to 2 retries with escalating simplification
@@ -630,8 +708,8 @@ async def _send_animation(
                 error_msg = render._last_error
                 if "cancelled" not in error_msg.lower():
                     for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
-                        logger.info("Render failed вЂ” self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
-                        await _safe_reply(message, f"рџ”§ Render failed, asking Qwen 3.7 Max to fix the code (attempt {heal_attempt})вЂ¦")
+                        logger.info("Render failed — self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
+                        await _safe_reply(message, f"🔧 Render failed, asking Qwen 3.7 Max to fix the code (attempt {heal_attempt})…")
 
                         try:
                             fixed_code = await fix_manim_code(prompt, error_msg, theme_prompt, original_code=code)
@@ -648,7 +726,7 @@ async def _send_animation(
                                 # Second attempt: simplify if first repair also failed
                                 if heal_attempt == 1:
                                     error_msg = render._last_error or error_msg
-                                    await _safe_reply(message, "рџ”§ Still failing вЂ” trying a simpler versionвЂ¦")
+                                    await _safe_reply(message, "🔧 Still failing — trying a simpler version…")
                                     fixed_code = await fix_manim_code(
                                         prompt,
                                         f"Previous repair also failed. SIMPLIFY the scene: reduce object count, remove heavy updaters, fewer self.play() calls, shorter duration. Error: {error_msg}",
@@ -675,14 +753,14 @@ async def _send_animation(
             if task.is_cancelled():
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.now()
-                await _safe_reply(message, "вќЊ Render cancelled.")
+                await _safe_reply(message, "❌ Render cancelled.")
                 return
 
             # Deterministic fallback: never fail a user request just because generated code is brittle.
             if video_path is None:
                 error_detail = render._last_error or "Unknown error"
                 logger.warning("LLM render failed after repair; using deterministic fallback. Last error: %s", error_detail[:700])
-                await _safe_reply(message, "рџ›џ Generated code was unstable, rendering a safe fallback animation insteadвЂ¦")
+                await _safe_reply(message, "🛟 Generated code was unstable, rendering a safe fallback animation instead…")
                 fallback_code = build_fallback_scene(prompt, bg_color=theme.bg_color)
                 video_path = await render(
                     fallback_code, chat_id, timeout=min(MANIM_TIMEOUT, 180), quality="-ql",
@@ -695,7 +773,7 @@ async def _send_animation(
                     if task.is_cancelled():
                         task.status = TaskStatus.CANCELLED
                         task.completed_at = datetime.now()
-                        await _safe_reply(message, "вќЊ Render cancelled.")
+                        await _safe_reply(message, "❌ Render cancelled.")
                         return
                     error_display = (render._last_error or error_detail or "Unknown error")[:500]
                     task.status = TaskStatus.FAILED
@@ -703,10 +781,58 @@ async def _send_animation(
                     task.completed_at = datetime.now()
                     analytics.log_render_failure(chat_id, "render_failed")
                     await _safe_reply(message, (
-                        f"вќЊ Animation failed after generated, repaired, and fallback attempts.\n\n"
+                        f"❌ Animation failed after generated, repaired, and fallback attempts.\n\n"
                         f"**Error:**\n```\n{error_display}\n```"
                     ))
                     return
+
+            # ── Visual feedback loop: critique the ACTUAL rendered frames ──
+            # The only quality check that SEES the pixels. On a fail it feeds the
+            # visible issues back to the generator and re-renders. Bounded + fully
+            # non-fatal (any error keeps the current render).
+            if VISUAL_CRITIC_ENABLED and video_path and not task.is_cancelled():
+                for vpass in range(VISUAL_CRITIC_MAX_PASSES):
+                    try:
+                        verdict = await critique_render(video_path, prompt, code)
+                    except Exception as e:
+                        logger.warning(f"Visual critic error (non-fatal): {e}")
+                        break
+                    if verdict is None or verdict.passed:
+                        if verdict:
+                            logger.info("Visual critic passed (score %.1f)", verdict.score)
+                        break
+                    await _safe_edit(
+                        status_msg,
+                        "🔎 *Visual critic found issues* (score {:.1f}/10)\n_Polishing the composition…_".format(verdict.score),
+                    )
+                    guidance = list(verdict.issues)
+                    if verdict.regenerate_guidance:
+                        guidance.append(verdict.regenerate_guidance)
+                    if not guidance:
+                        break
+                    try:
+                        improved = strip_code_fences(await repair_targeted(
+                            code, guidance, prompt,
+                            theme_instructions=theme_prompt,
+                            focus="visual composition, readability, spacing and removing overlap/clutter",
+                        ))
+                    except Exception as e:
+                        logger.warning(f"Visual-critic repair failed (non-fatal): {e}")
+                        break
+                    if "class GenScene" not in improved or "def construct" not in improved:
+                        logger.warning("Visual-critic repair invalid structure; keeping current render")
+                        break
+                    new_video = await render(
+                        improved, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
+                        tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                        progress_cb=_on_manim_progress,
+                    )
+                    if new_video:
+                        video_path, code = new_video, improved
+                        logger.info("Visual-critic re-render succeeded (pass %d)", vpass + 1)
+                    else:
+                        logger.warning("Visual-critic re-render failed; keeping previous render")
+                        break
 
             # Record render success
             render_time = (datetime.now() - render_start).total_seconds()
@@ -724,17 +850,22 @@ async def _send_animation(
             except Exception as e:
                 logger.warning(f"Watermark error (non-fatal): {e}")
 
-            # Voiceover merge (narration already generated in parallel)
-            if narration and VOICEOVER_ENABLED:
+            # Voiceover: derive narration FROM the final code (references the
+            # actual visual beats), then fit it to the video length so the audio
+            # tracks the animation instead of forcing a frozen tail frame.
+            if user_voiceover and VOICEOVER_ENABLED:
                 try:
                     await bot.send_chat_action(chat_id, ChatAction.RECORD_VOICE)
-                    vo_dir = Path("tmp") / "voiceover" / str(chat_id)
-                    narrated = await add_voiceover(
-                        video_path, narration, vo_dir,
-                        voice=user_voice, rate=user_rate,
-                    )
-                    if narrated:
-                        video_path = narrated
+                    narration = await _generate_narration(prompt, code)
+                    if narration:
+                        vo_dir = Path("tmp") / "voiceover" / str(chat_id)
+                        narrated = await add_voiceover(
+                            video_path, narration, vo_dir,
+                            voice=user_voice, rate=user_rate,
+                            fit_to_video=True,
+                        )
+                        if narrated:
+                            video_path = narrated
                 except Exception as e:
                     logger.warning(f"Voiceover merge failed (non-fatal): {e}")
 
@@ -783,16 +914,17 @@ async def _send_animation(
                 completed_at=task.completed_at,
             )
 
-            # Save to D1 cache (fire-and-forget with tracking)
-            if telegram_file_id:
+            # Save to D1 cache (fire-and-forget with tracking).
+            # Uses the same composite cache_key as the lookup; skipped for edits.
+            if telegram_file_id and not skip_cache:
                 _d1_tasks: set[asyncio.Task] = set()
                 d1_task = asyncio.create_task(
-                    d1.save_render(chat_id, prompt, code, telegram_file_id)
+                    d1.save_render(chat_id, cache_key, code, telegram_file_id)
                 )
                 _d1_tasks.add(d1_task)
                 d1_task.add_done_callback(_d1_tasks.discard)
 
-            logger.info(f"Animation done вЂ” chat_id={chat_id}, prompt={prompt[:50]}вЂ¦")
+            logger.info(f"Animation done — chat_id={chat_id}, prompt={prompt[:50]}…")
 
         except Exception as e:
             logger.error(f"Animation pipeline error: {e}", exc_info=True)
@@ -800,34 +932,47 @@ async def _send_animation(
             task.error_message = str(e)
             task.completed_at = datetime.now()
             analytics.log_render_failure(chat_id, "pipeline_error")
-            await _safe_reply(message, f"вљ пёЏ Animation failed: {e}")
+            await _safe_reply(message, f"⚠️ Animation failed: {e}")
 
 
-async def _generate_narration(prompt: str) -> str:
-    """Generate TTS narration text via Qwen."""
+async def _generate_narration(prompt: str, code: str = "") -> str | None:
+    """Generate TTS narration that follows the ACTUAL animation.
+
+    Derived from the generated Manim code (not just the prompt) so the spoken
+    script tracks the real visual beats in order. The audio is later fit to the
+    video length, so the script should describe the animation's full arc.
+    """
+    code_context = ""
+    if code:
+        code_context = (
+            "\n\nThe animation is produced by this Manim code. Narrate the visual "
+            "events in the order they occur on screen:\n```python\n"
+            f"{code[:4000]}\n```"
+        )
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a narrator for short mathematical animations. Given the animation "
-                "description, write a tight 12-18 second narration script, maximum 45 words. "
-                "Use vivid language, but do not over-explain. Match a 12-20 second video so "
-                "the last frame is not frozen for extra audio. Output ONLY the narration text, "
-                "no markdown or stage directions."
+                "You are a narrator for short mathematical animations. Write a narration "
+                "that walks through what appears on screen, in order, guiding the viewer's "
+                "eye ('first…', 'then…', 'notice how…'). Explain the WHY, not just the WHAT. "
+                "Keep it concise (about 2-5 sentences, 35-90 words depending on the "
+                "animation's length and complexity). Output ONLY the narration text — no "
+                "markdown, no stage directions, no scene numbers."
             ),
         },
-        {"role": "user", "content": f"Animation: {prompt}"},
+        {"role": "user", "content": f"Animation request: {prompt}{code_context}"},
     ]
     try:
         text = await chat(messages)
-        return text.strip() if text and not text.startswith("вљ пёЏ") else None
+        return text.strip() if text and not text.startswith("⚠️") else None
     except Exception as e:
         logger.warning(f"Narration generation failed: {e}")
         return None
 
 
 # ---------------------------------------------------------------------------
-# Handlers вЂ” Commands
+# Handlers — Commands
 
 @dp.message(Command("tiktok"))
 async def cmd_tiktok(message: types.Message) -> None:
@@ -868,7 +1013,7 @@ async def cmd_export(message: types.Message) -> None:
     hashtags = _generate_hashtags(prompt)
     caption = f"{prompt[:80]}...\n\n{hashtags}\n\nMade with @Manim_is_so_useful_bot"
     video_path = last_render.get("video_path")
-    if video_path and pathlib.Path(video_path).exists():
+    if video_path and Path(video_path).exists():
         await message.reply_video(video=FSInputFile(video_path), caption=caption)
     else:
         await _safe_reply(message, f"TikTok-ready caption:\n\n{caption}")
@@ -973,7 +1118,7 @@ async def cmd_help(message: types.Message) -> None:
 async def cmd_clean(message: types.Message) -> None:
     cleanup()
     render_queue.cleanup_old_tasks()
-    await _safe_answer(message, "рџ§№ Render cache cleaned.")
+    await _safe_answer(message, "🧹 Render cache cleaned.")
 
 
 @dp.message(Command("history"))
@@ -983,21 +1128,21 @@ async def cmd_history(message: types.Message) -> None:
     try:
         records = db.get_user_history(message.chat.id, limit=10)
         if not records:
-            await _safe_reply(message, "рџ“­ No animation history yet. Try `/animation rotating cube`!")
+            await _safe_reply(message, "📭 No animation history yet. Try `/animation rotating cube`!")
             return
 
-        lines = ["рџ“њ **Your Recent Animations:**\n"]
+        lines = ["📜 **Your Recent Animations:**\n"]
         for i, rec in enumerate(records, 1):
             prompt = rec.get("prompt", "unknown")[:50]
             status = rec.get("status", "unknown")
             theme = rec.get("theme", "default")
-            emoji = "вњ…" if status == "completed" else "вќЊ" if status == "failed" else "вЏі"
-            lines.append(f"{i}. {emoji} `{prompt}` вЂ” _{theme}_")
+            emoji = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
+            lines.append(f"{i}. {emoji} `{prompt}` — _{theme}_")
         lines.append(f"\n**Total:** {len(records)} animation(s)")
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"History error: {e}")
-        await _safe_reply(message, f"вљ пёЏ Couldn't fetch history: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't fetch history: {e}")
 
 
 @dp.message(Command("code"))
@@ -1012,16 +1157,16 @@ async def cmd_code(message: types.Message) -> None:
             code = get_last_generated_code(message.chat.id)
 
         if not code:
-            await _safe_reply(message, "рџ“­ No code available yet. Try `/animation rotating cube` first!")
+            await _safe_reply(message, "📭 No code available yet. Try `/animation rotating cube` first!")
             return
 
         if len(code) > 3800:
             code = code[:3800] + "\n\n# ... truncated"
 
-        await _safe_answer(message, f"рџђЌ **Last Generated Code:**\n```python\n{code}\n```")
+        await _safe_answer(message, f"🐍 **Last Generated Code:**\n```python\n{code}\n```")
     except Exception as e:
         logger.error(f"Code fetch error: {e}")
-        await _safe_reply(message, f"вљ пёЏ Couldn't fetch code: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't fetch code: {e}")
 
 
 @dp.message(Command("stats"))
@@ -1034,12 +1179,12 @@ async def cmd_stats(message: types.Message) -> None:
         top_errors = analytics.get_top_errors(limit=5)
 
         lines = [
-            "рџ“Љ **Bot Statistics**\n",
+            "📊 **Bot Statistics**\n",
             f"**Global:** {global_stats['total']} renders | "
-            f"{global_stats['completed']} вњ… | {global_stats['failed']} вќЊ | "
+            f"{global_stats['completed']} ✅ | {global_stats['failed']} ❌ | "
             f"{global_stats['unique_users']} users",
             f"**You:** {user_stats['renders']} renders | "
-            f"{user_stats['success']} вњ… | {user_stats['failed']} вќЊ",
+            f"{user_stats['success']} ✅ | {user_stats['failed']} ❌",
             f"**Avg render time:** {render_stats['avg_render_time']:.1f}s",
             f"**Success rate:** {render_stats['success_rate']:.1f}%",
         ]
@@ -1047,12 +1192,12 @@ async def cmd_stats(message: types.Message) -> None:
         if top_errors:
             lines.append("\n**Top Errors (24h):**")
             for err_type, count in top_errors:
-                lines.append(f"  вЂў `{err_type}`: {count}")
+                lines.append(f"  • `{err_type}`: {count}")
 
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"Stats error: {e}")
-        await _safe_reply(message, f"вљ пёЏ Couldn't fetch stats: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't fetch stats: {e}")
 
 
 @dp.message(Command("animation"))
@@ -1075,7 +1220,7 @@ async def cmd_theme(message: types.Message) -> None:
     new_theme = next_theme(current)
     user_settings.set(message.chat.id, "theme", new_theme)
     theme = get_theme(new_theme)
-    await _safe_reply(message, f"рџЋЁ Theme set to **{theme.name}**\n\n_{theme.palette_desc[:100]}вЂ¦_")
+    await _safe_reply(message, f"🎨 Theme set to **{theme.name}**\n\n_{theme.palette_desc[:100]}…_")
 
 
 @dp.message(Command("settings"))
@@ -1086,26 +1231,26 @@ async def cmd_settings(message: types.Message) -> None:
         theme = get_theme(s.get("theme", "visual_math"))
         provider_name = "Claude Opus 4.8" if s.get("provider") == "claude" else "Qwen 3.6 Plus"
         lines = [
-            "вљ™пёЏ **Your Settings**\n",
+            "⚙️ **Your Settings**\n",
             f"**Theme:** {theme.name}",
-            f"**Style:** visual intuition в†’ transformation в†’ insight в†’ recap",
+            f"**Style:** visual intuition → transformation → insight → recap",
             f"**Quality:** `{s.get('quality', MANIM_QUALITY)}`",
             f"**Chat LLM:** {provider_name}",
-            f"**Voiceover:** {'вњ… enabled' if s.get('voiceover_enabled') else 'вќЊ disabled'}",
+            f"**Voiceover:** {'✅ enabled' if s.get('voiceover_enabled') else '❌ disabled'}",
             f"**TTS Voice:** `{s.get('tts_voice', TTS_VOICE)}`",
             f"**TTS Rate:** `{s.get('tts_rate', TTS_RATE)}`",
             "",
             "**Commands:**",
-            "вЂў `/theme` вЂ” cycle visual theme",
-            "вЂў `/provider qwen|claude` вЂ” switch chat LLM",
-            "вЂў `/voice on|off` вЂ” toggle voiceover",
-            "вЂў `/quality -ql|-qm|-qh` вЂ” set render quality",
-            "вЂў `/reset` вЂ” revert to defaults",
+            "• `/theme` — cycle visual theme",
+            "• `/provider qwen|claude` — switch chat LLM",
+            "• `/voice on|off` — toggle voiceover",
+            "• `/quality -ql|-qm|-qh` — set render quality",
+            "• `/reset` — revert to defaults",
         ]
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"Settings error: {e}")
-        await _safe_reply(message, f"вљ пёЏ Couldn't load settings: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't load settings: {e}")
 
 
 @dp.message(Command("voice"))
@@ -1114,10 +1259,10 @@ async def cmd_voice(message: types.Message) -> None:
     args = (message.text or "").replace("/voice", "", 1).strip().lower()
     if args in ("on", "1", "yes", "true"):
         user_settings.set(message.chat.id, "voiceover_enabled", True)
-        await _safe_reply(message, "рџ”Љ Voiceover **enabled**")
+        await _safe_reply(message, "🔊 Voiceover **enabled**")
     elif args in ("off", "0", "no", "false"):
         user_settings.set(message.chat.id, "voiceover_enabled", False)
-        await _safe_reply(message, "рџ”‡ Voiceover **disabled**")
+        await _safe_reply(message, "🔇 Voiceover **disabled**")
     else:
         current = user_settings.get(message.chat.id, "voiceover_enabled")
         await _safe_reply(message, f"Voiceover is currently {'**enabled**' if current else '**disabled**'}.\n\nUsage: `/voice on` or `/voice off`")
@@ -1127,13 +1272,13 @@ async def cmd_voice(message: types.Message) -> None:
 async def cmd_quality(message: types.Message) -> None:
     """Set render quality."""
     args = (message.text or "").replace("/quality", "", 1).strip()
-    valid = {"-l": "вљЎ Preview", "-ql": "рџљЂ Fast", "-qm": "вњ… Standard", "-qh": "рџЋ¬ High"}
+    valid = {"-l": "⚡ Preview", "-ql": "🚀 Fast", "-qm": "✅ Standard", "-qh": "🎬 High"}
     if args in valid:
         user_settings.set(message.chat.id, "quality", args)
         await _safe_reply(message, f"Quality set to **{valid[args]}** (`{args}`)")
     else:
         await _safe_reply(message, "Usage: `/quality -ql` or `-qm` or `-qh`\n\n" +
-                          "\n".join(f"  `{k}` вЂ” {v}" for k, v in valid.items()))
+                          "\n".join(f"  `{k}` — {v}" for k, v in valid.items()))
 
 
 @dp.message(Command("provider"))
@@ -1144,16 +1289,16 @@ async def cmd_provider_cmd(message: types.Message) -> None:
     current = user_settings.get(chat_id, "provider")
     if args in ("claude", "opus"):
         user_settings.set(chat_id, "provider", "claude")
-        await _safe_reply(message, "рџ§  Your LLM switched to **Claude Opus 4.8**")
+        await _safe_reply(message, "🧠 Your LLM switched to **Claude Opus 4.8**")
     elif args in ("qwen", "qwen3"):
         user_settings.set(chat_id, "provider", "qwen")
-        await _safe_reply(message, "рџ§  Your LLM switched to **Qwen 3.6 Plus**")
+        await _safe_reply(message, "🧠 Your LLM switched to **Qwen 3.6 Plus**")
     else:
         await _safe_reply(message,
             f"Your current LLM: **{current.upper()}**\n\n"
             f"Usage: `/provider qwen` or `/provider claude`\n\n"
-            f"вЂў `qwen` вЂ” Qwen 3.6 Plus (fast, DashScope)\n"
-            f"вЂў `claude` вЂ” Claude Opus 4.8 (high reasoning, Anthropic)"
+            f"• `qwen` — Qwen 3.6 Plus (fast, DashScope)\n"
+            f"• `claude` — Claude Opus 4.8 (high reasoning, Anthropic)"
         )
 
 
@@ -1161,21 +1306,21 @@ async def cmd_provider_cmd(message: types.Message) -> None:
 async def cmd_reset(message: types.Message) -> None:
     """Reset per-user settings to defaults."""
     user_settings.reset(message.chat.id)
-    await _safe_reply(message, "вљ™пёЏ Settings reset to defaults.")
+    await _safe_reply(message, "⚙️ Settings reset to defaults.")
 
 
 @dp.message(Command("examples"))
 async def cmd_examples(message: types.Message) -> None:
     """Show example animation prompts."""
     examples = get_all_examples()
-    lines = ["рџ“љ **Example Animations**\n"]
+    lines = ["📚 **Example Animations**\n"]
     current_cat = None
     for i, ex in enumerate(examples):
         if ex.get("category") != current_cat:
             current_cat = ex.get("category")
             lines.append(f"\n**{current_cat}:**")
-        dim = "рџЋІ" if ex.get("is_3d") else "рџ“ђ"
-        lines.append(f"  {i+1}. {dim} **{ex['name']}** вЂ” _{ex.get('description', '')}_")
+        dim = "🎲" if ex.get("is_3d") else "📐"
+        lines.append(f"  {i+1}. {dim} **{ex['name']}** — _{ex.get('description', '')}_")
 
     lines.append(f"\n_Run `/example 1` or send me any prompt for a polished Visual Math render._")
     await _safe_reply(message, "\n".join(lines))
@@ -1191,10 +1336,10 @@ async def cmd_example(message: types.Message) -> None:
 
     example = get_example_by_index(int(args) - 1)
     if not example:
-        await _safe_reply(message, "рџ“­ Example not found. Use `/examples` to see available demos.")
+        await _safe_reply(message, "📭 Example not found. Use `/examples` to see available demos.")
         return
 
-    await _safe_reply(message, f"рџ“ђ Rendering **{example['name']}** in Visual Math styleвЂ¦")
+    await _safe_reply(message, f"📐 Rendering **{example['name']}** in Visual Math style…")
     await _send_animation(
         message,
         example["prompt"],
@@ -1209,16 +1354,16 @@ async def cmd_cancel(message: types.Message) -> None:
     task = render_queue.get_user_task(message.chat.id)
     if task:
         if task.cancel():
-            await _safe_reply(message, f"вќЊ Cancelled: `{task.prompt[:50]}вЂ¦`")
+            await _safe_reply(message, f"❌ Cancelled: `{task.prompt[:50]}…`")
             analytics.log_render_cancelled(message.chat.id)
         else:
-            await _safe_reply(message, "вљ пёЏ Could not cancel task.")
+            await _safe_reply(message, "⚠️ Could not cancel task.")
     else:
-        await _safe_reply(message, "рџ“­ No active render task.")
+        await _safe_reply(message, "📭 No active render task.")
 
 
 # ---------------------------------------------------------------------------
-# Handlers вЂ” WebApp Data (Settings)
+# Handlers — WebApp Data (Settings)
 # ---------------------------------------------------------------------------
 
 
@@ -1498,12 +1643,15 @@ async def handle_webapp_data(message: types.Message) -> None:
         if "voiceover" in data:
             updates["voiceover_enabled"] = data["voiceover"] in (True, "true", "on", 1, "1")
 
-        # Validate TTS rate
+        # Validate TTS rate — accept "25", "+25", "-30", "25%", "+25%" and
+        # normalize to edge-tts's required signed-percent form ("+25%"/"-30%").
         if "rate" in data:
             try:
-                rate_val = float(str(data["rate"]).replace("%", "").replace("+", "").replace("-", ""))
+                rate_val = int(float(str(data["rate"]).replace("%", "").strip()))
                 if -50 <= rate_val <= 100:
-                    updates["tts_rate"] = f"+{data['rate']}" if not str(data["rate"]).startswith("-") else str(data["rate"])
+                    updates["tts_rate"] = f"+{rate_val}%" if rate_val >= 0 else f"{rate_val}%"
+                else:
+                    logger.warning(f"WebApp: rate out of range '{data['rate']}' from chat_id={chat_id}")
             except ValueError:
                 logger.warning(f"WebApp: invalid rate '{data['rate']}' from chat_id={chat_id}")
 
@@ -1517,19 +1665,19 @@ async def handle_webapp_data(message: types.Message) -> None:
 
         if updates:
             user_settings.set_many(chat_id, updates)
-            await _safe_reply(message, f"вњ… Settings updated: {', '.join(updates.keys())}")
+            await _safe_reply(message, f"✅ Settings updated: {', '.join(updates.keys())}")
         else:
-            await _safe_reply(message, "вљ пёЏ No valid settings found in data.")
+            await _safe_reply(message, "⚠️ No valid settings found in data.")
 
     except json.JSONDecodeError:
-        await _safe_reply(message, "вљ пёЏ Invalid settings data format.")
+        await _safe_reply(message, "⚠️ Invalid settings data format.")
     except Exception as e:
         logger.error(f"WebApp handler error: {e}", exc_info=True)
-        await _safe_reply(message, f"вљ пёЏ Couldn't save settings: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't save settings: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Handlers вЂ” Photo (Vision)
+# Handlers — Photo (Vision)
 # ---------------------------------------------------------------------------
 
 @dp.message(F.photo)
@@ -1660,7 +1808,10 @@ async def handle_code_callback(callback: types.CallbackQuery) -> None:
     if len(code) > 3800:
         code = code[:3800] + "\n\n# ... truncated"
 
-    await callback.answer("Code: " + code[:200] + "...", show_alert=True)
+    # Telegram alerts are capped at 200 chars — send the full code as a
+    # formatted message instead of truncating it into a tiny toast.
+    await callback.answer("🐍 Sending the code…", show_alert=False)
+    await _safe_answer(callback.message, f"🐍 **Generated Code:**\n```python\n{code}\n```")
 
 
 @dp.callback_query(F.data.startswith("edit:"))
@@ -1693,10 +1844,13 @@ async def handle_text(message: types.Message) -> None:
             original_prompt = last_render.get("prompt", "")
             last_code = last_render.get("code", "")
             await _safe_reply(message, f"✏️ Editing animation: _\"{original_prompt[:60]}...\"_\n\nApplying: _\"{text[:80]}\"_")
-            # Treat as a new animation with combined prompt
-            combined_prompt = f"{original_prompt}. EDIT: {text}"
-            is_3d = any(w in combined_prompt.lower() for w in ("3d", "three-dimensional"))
-            await _send_animation(message, combined_prompt, is_3d=is_3d)
+            # Edit-by-diff: start from the prior code and apply only the change,
+            # preserving the animation the user already liked.
+            is_3d = any(w in (original_prompt + " " + text).lower() for w in ("3d", "three-dimensional"))
+            await _send_animation(
+                message, original_prompt, is_3d=is_3d,
+                edit_base_code=last_code, edit_instruction=text,
+            )
             return
         # No code available, treat as normal message
         logger.warning("Reply to video but no code in DB — treating as normal chat")
@@ -1724,7 +1878,7 @@ async def handle_text(message: types.Message) -> None:
             await _safe_reply(message, response)
         except Exception as e:
             logger.error(f"Chat handler error: {e}")
-            await _safe_reply(message, f"вљ пёЏ Chat temporarily unavailable: {e}")
+            await _safe_reply(message, f"⚠️ Chat temporarily unavailable: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1769,12 +1923,12 @@ async def _analytics_flush_loop():
 
 async def main() -> None:
     await d1.init()
-    logger.info("Starting Manim Animation Bot + AI AssistantвЂ¦")
+    logger.info("Starting Manim Animation Bot + AI Assistant…")
     logger.info(f"Qwen 3.7 Max: {GPT_MODEL} (reasoning: {GPT_REASONING_EFFORT})")
     logger.info(f"Chat:    {CHAT_MODEL}")
     logger.info(f"Cloud:   D1 {'enabled' if D1_ENABLED else 'disabled (graceful fallback)'}")
     logger.info(f"TTS:     {'enabled' if VOICEOVER_ENABLED else 'disabled'} ({TTS_VOICE})")
-    logger.info("Polling started вЂ” waiting for messages")
+    logger.info("Polling started — waiting for messages")
 
     # Start analytics flusher as background task (tracked for shutdown)
     _analytics_task = asyncio.create_task(_analytics_flush_loop())

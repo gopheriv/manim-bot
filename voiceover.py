@@ -52,6 +52,19 @@ async def _get_duration(path: Path) -> float:
     return await asyncio.to_thread(_get_duration_sync, path)
 
 
+def _parse_rate(rate_str: str | None) -> int:
+    """Parse an edge-tts rate string like '+10%' / '-20%' into an int percent."""
+    try:
+        return int(str(rate_str).replace("%", "").replace("+", "").strip())
+    except (ValueError, TypeError):
+        return 0
+
+
+def _format_rate(pct: int) -> str:
+    """Format an int percent back into an edge-tts rate string."""
+    return f"+{pct}%" if pct >= 0 else f"{pct}%"
+
+
 async def synthesize(text: str, output_path: Path, voice: str | None = None, rate: str | None = None) -> Path | None:
     """Convert text to speech using edge-tts and save as MP3."""
     tts_voice = voice or TTS_VOICE
@@ -123,8 +136,10 @@ async def merge(video_path: Path, audio_path: Path, output_path: Path) -> Path |
                 str(output_path),
             ]
         else:
-            # Standard merge — copy video stream (no re-encode!) for speed
-            # Only transcode audio to AAC, video is bitstream-copied
+            # Audio <= video: play the FULL video with the narration over the
+            # start and trailing silence after. We deliberately omit "-shortest"
+            # here — with shorter audio it would cut the video at the audio's end
+            # and chop off the animation's closing beats.
             cmd = [
                 FFMPEG,
                 "-y",
@@ -135,7 +150,6 @@ async def merge(video_path: Path, audio_path: Path, output_path: Path) -> Path |
                 "-b:a", "128k",
                 "-map", "0:v:0",
                 "-map", "1:a:0",
-                "-shortest",
                 "-movflags", "+faststart",
                 str(output_path),
             ]
@@ -275,14 +289,19 @@ async def add_voiceover(
     output_dir: Path,
     voice: str | None = None,
     rate: str | None = None,
+    fit_to_video: bool = False,
 ) -> Path | None:
     """Full pipeline: text → TTS → merge with video → narrated .mp4.
 
     Returns the path to the narrated video, or None on failure.
-    
+
     Args:
         voice: Override TTS voice (default: config TTS_VOICE)
         rate: Override TTS rate (default: config TTS_RATE)
+        fit_to_video: When True, measure the rendered video and (if the narration
+            is much longer/shorter) re-synthesize once at an adjusted speaking
+            rate so the audio tracks the animation — instead of forcing a frozen
+            tail frame to pad the video to the audio.
     """
     audio_path = output_dir / f"{video_path.stem}_narration.mp3"
     narrated_path = output_dir / f"{video_path.stem}_narrated.mp4"
@@ -290,10 +309,34 @@ async def add_voiceover(
     tts_voice = voice or TTS_VOICE
     tts_rate = rate or TTS_RATE
 
-    # Step 1: Synthesize speech
+    # Step 1: Synthesize speech at the base rate
     audio = await synthesize(narration_text, audio_path, voice=tts_voice, rate=tts_rate)
     if audio is None:
         return None
+
+    # Step 1b: Fit the narration to the video length by adjusting the rate once.
+    if fit_to_video:
+        try:
+            video_dur = await _get_duration(video_path)
+            audio_dur = await _get_duration(audio_path)
+            if video_dur > 0.5 and audio_dur > 0.5:
+                ratio = audio_dur / video_dur
+                # Only adjust on a meaningful mismatch (>10% long or >15% short).
+                if ratio > 1.10 or ratio < 0.85:
+                    base_pct = _parse_rate(tts_rate)
+                    delta = round((ratio - 1.0) * 100)  # speak faster if long, slower if short
+                    new_pct = max(-40, min(80, base_pct + delta))
+                    new_rate = _format_rate(new_pct)
+                    if new_rate != tts_rate:
+                        logger.info(
+                            "Fitting narration to video: audio %.1fs vs video %.1fs "
+                            "(ratio %.2f) → rate %s", audio_dur, video_dur, ratio, new_rate,
+                        )
+                        refit = await synthesize(narration_text, audio_path, voice=tts_voice, rate=new_rate)
+                        if refit is not None:
+                            audio = refit
+        except Exception as e:
+            logger.warning("Narration fit-to-video failed (using base rate): %s", e)
 
     # Step 2: Merge audio + video
     result = await merge(video_path, audio, narrated_path)

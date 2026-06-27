@@ -48,7 +48,11 @@ CLAUDE_MODEL = _get("CLAUDE_MODEL", "claude-opus-4-8")
 # ── LLM Provider switch: qwen or claude ─────────────────────────────────────
 LLM_PROVIDER = _get("LLM_PROVIDER", "qwen").lower()
 
-# ── Judge of AI Court (MiniMax M3 — separate model from generator) ───────────
+# ── Judge of AI Court (separate, STRONG model — correctness review only) ──────
+# JUDGE_PROVIDER: "auto" prefers Claude (strongest) when CLAUDE_API_KEY is set,
+# else falls back to the JUDGE_* OpenAI-compatible endpoint. Force with
+# "claude" or "openai".
+JUDGE_PROVIDER = _get("JUDGE_PROVIDER", "auto").lower()
 JUDGE_BASE_URL = _get("JUDGE_BASE_URL", "")
 JUDGE_API_KEY = _get("JUDGE_API_KEY", "")
 JUDGE_MODEL = _get("JUDGE_MODEL", "MiniMax-M3")
@@ -56,9 +60,31 @@ JUDGE_TIMEOUT = _getint("JUDGE_TIMEOUT", 60)
 JUDGE_MAX_ITERATIONS = _getint("JUDGE_MAX_ITERATIONS", 2)
 
 # ── Manim rendering ─────────────────────────────────────────────────────────
-MANIM_QUALITY = _get("MANIM_QUALITY", "-qm")
+MANIM_QUALITY = _get("MANIM_QUALITY", "-qm")  # fallback only; render tier default wins
 MANIM_TIMEOUT = _getint("MANIM_TIMEOUT", 600)  # 10 minutes
 MANIM_MAX_RETRIES = _getint("MANIM_MAX_RETRIES", 1)  # self-heal attempts
+
+# ── Render tier (quality scales with available hardware) ─────────────────────
+# auto = detect from RAM/CPU; or force cinematic | standard | constrained
+RENDER_TIER = _get("RENDER_TIER", "auto").lower()
+MANIM_FPS = _getint("MANIM_FPS", 0)  # 0 = use the tier's fps; >0 forces a value
+
+# ── Code generation quality knobs ────────────────────────────────────────────
+# Larger output ceiling so ambitious multi-scene code is not truncated.
+MANIM_MAX_OUTPUT_TOKENS = _getint("MANIM_MAX_OUTPUT_TOKENS", 16384)
+# Enable Qwen "thinking" for the creative code-gen task. Safeguarded in llm.py:
+# if a thinking response returns no content, it retries with thinking disabled.
+MANIM_ENABLE_THINKING = _getbool("MANIM_ENABLE_THINKING", True)
+# Reviewer-driven pre-render repair (education accuracy + low critic score).
+REVIEW_REPAIR_ENABLED = _getbool("REVIEW_REPAIR_ENABLED", True)
+CRITIC_REPAIR_THRESHOLD = float(_get("CRITIC_REPAIR_THRESHOLD", "6.0") or "6.0")
+
+# ── Visual feedback loop (render → vision critique → regenerate) ─────────────
+VISUAL_CRITIC_ENABLED = _getbool("VISUAL_CRITIC_ENABLED", True)
+VISUAL_CRITIC_MAX_PASSES = _getint("VISUAL_CRITIC_MAX_PASSES", 1)
+VISUAL_CRITIC_KEYFRAMES = _getint("VISUAL_CRITIC_KEYFRAMES", 4)
+# Which provider scores rendered frames: "qwen" (default) or "claude".
+VISION_PROVIDER = _get("VISION_PROVIDER", "qwen").lower()
 
 # ── Queue / Concurrency ─────────────────────────────────────────────────────
 MAX_CONCURRENT_RENDERS = _getint("MAX_CONCURRENT_RENDERS", 1)  # 1 on i5/8GB RAM

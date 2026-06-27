@@ -96,6 +96,17 @@ def get(chat_id: int, key: str) -> str | bool:
         raise KeyError(f"Unknown setting: {key}")
 
 
+def get_override(chat_id: int, key: str):
+    """Return the user's explicit override for a key, or None if unset.
+
+    Unlike get(), this does NOT fall back to a global default — it lets callers
+    distinguish "user explicitly chose X" from "user never set it", e.g. so a
+    render tier's default quality can win when the user hasn't picked one.
+    """
+    data = _load()
+    return data.get(str(chat_id), {}).get(key)
+
+
 def get_all(chat_id: int) -> dict:
     """Get all settings for a chat (with defaults filled in)."""
     return {

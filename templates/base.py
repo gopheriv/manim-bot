@@ -77,8 +77,12 @@ class SceneTemplate(ABC):
         return TemplateConfig()
 
 
-def _common_manim_header(class_name: str = "GenScene") -> str:
-    """Return the standard Manim scene header used by all templates."""
+def _common_manim_header(class_name: str = "GenScene", bg_color: str = "#0A0A0F") -> str:
+    """Return the standard Manim scene header used by all templates.
+
+    bg_color defaults to the dark template background, but callers (and the bot's
+    template branch) substitute the active theme's background for style unity.
+    """
     return f"""from manim import *
 import numpy as np
 import math
@@ -86,7 +90,7 @@ import math
 
 class {class_name}(Scene):
     def construct(self):
-        self.camera.background_color = "#0A0A0F"
+        self.camera.background_color = "{bg_color}"
 """
 
 
@@ -96,10 +100,15 @@ def _indent(code: str, spaces: int = 8) -> str:
     return "\n".join(prefix + line if line.strip() else line for line in code.split("\n"))
 
 
-def _star_field(count: int = 25, spread: float = 6.0) -> str:
-    """Generate background star/particle field — shared by all templates."""
+def _star_field(count: int = 20, spread: float = 6.0) -> str:
+    """Generate a background star/particle field — shared helper.
+
+    Static and cheap: `Dot` takes `fill_opacity` (not `opacity`) and we do NOT
+    attach a per-dot updater (that would be {count} updaters — far over budget
+    and the `sin(dt*…)` form barely moved anyway).
+    """
     return f"""
-# Background particle field
+# Background particle field (static — cheap, no per-dot updaters)
 stars = VGroup()
 for i in range({count}):
     angle = (i / {count}) * TAU
@@ -108,14 +117,10 @@ for i in range({count}):
         r * np.array([math.cos(angle), math.sin(angle), 0]),
         radius=0.03,
         color=WHITE,
-        opacity=0.3
+        fill_opacity=0.3,
     )
     stars.add(star)
 self.play(FadeIn(stars, run_time=2), rate_func=smooth)
-
-# Add subtle drift to stars
-for s in stars:
-    s.add_updater(lambda m, dt: m.shift(UP * 0.001 * math.sin(dt * 0.5)))
 """
 
 

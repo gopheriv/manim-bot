@@ -1,11 +1,15 @@
-"""Prompt builder — compact, hardware-aware prompts for GPT-5.5.
+"""Prompt builder — tier-aware prompts for the Manim code generator.
 
-Philosophy: elegant minimalism over cinematic excess.
-A beautiful 3-layer scene that renders in 10s beats a 7-layer
-scene that OOMs on 8GB RAM.
+Philosophy: quality-first, scaled to the hardware. On capable hardware
+(cinematic/standard tiers) the model is directed to compose ambitious,
+professionally directed animations. On the constrained tier (8 GB laptop) it
+falls back to the strict "elegant minimalism" budget that keeps renders alive.
+The budget is a *tier*, not a global law.
 """
 
 from __future__ import annotations
+
+from render_tier import Tier, get_tier
 
 
 # ── Core rules ────────────────────────────────────────────────────────────────
@@ -15,13 +19,13 @@ Output ONLY Python code. No explanation, no markdown fences.
 
 ## Structure
 - `from manim import *` and `import numpy as np`
-- `class GenScene(Scene):` with `def construct(self):`
+- The scene class MUST be named `GenScene`. Use `class GenScene(Scene):` — or
+  `class GenScene(MovingCameraScene):` when you want camera moves, or
+  `class GenScene(ThreeDScene):` for true 3D — with `def construct(self):`
 - Set `self.camera.background_color = "HEX"` in construct()
-- Runnable via `manim -qm file.py GenScene`
 - Use ONLY Manim CE built-ins — no external libs, no network
 - Set properties via methods: `.set_stroke()`, `.set_fill()`, `.set_opacity()` — avoid kwargs like `stroke_color=` in constructors when possible
-- Total duration: 12-25 seconds
-- Max 150 total animation frames
+- Duration and complexity are governed by the performance/budget section below
 
 ## NUMPY 2.x COMPATIBILITY (CRITICAL)
 - NEVER use `np.math.*` — use `math.*` (import math)
@@ -120,6 +124,73 @@ HARDWARE_3D_LIMITS = """## 3D Scene Limits (only when 3D is requested)
 - Prefer 2D with depth cues over heavy 3D
 """
 
+# ── Ambition-first house style (capable tiers) ───────────────────────────────
+
+CINEMATIC_STYLE = """## Visual Direction (cinematic — aim for a professionally directed explainer)
+Make it clear AND beautiful. Compose every frame on purpose.
+
+- **Composition**: think in layers — a subtle background/atmosphere, the supporting
+  structure (axes, grids, vectors), and the hero mathematical object in front. Use the
+  WHOLE frame; balance negative space; don't cluster everything at the origin.
+- **Semantic, consistent color**: each concept keeps its color across equations, graphs,
+  vectors and labels. Pick a small, cohesive palette and stick to it.
+- **Strong motion design**: `Create`/`Write`/`DrawBorderThenFill` for hero objects,
+  `LaggedStart` for staggered reveals, `ReplacementTransform` to morph between related
+  forms. Ease with `rate_func` (smooth, there_and_back). No dead frames > 0.4s.
+- **Camera as a tool**: with `MovingCameraScene`, push in on the key moment, frame a
+  detail, or pull back to reveal scale — only when it serves the idea.
+- **Polish**: a soft glow on the hero object, a faint guiding grid, a gentle ambient
+  drift to close (never a hard freeze frame).
+- **Pacing by cognitive load**: simple beats ~2s, rich transforms 4-6s. Total duration
+  20-40s is welcome when the content earns it.
+
+Aim for 4-7 well-composed visual beats with clean transitions between them.
+"""
+
+ANTI_LAZY_CINEMATIC = """## Quality Floor (cinematic)
+- A clear narrative arc: hook → build → insight → resolution.
+- Multiple coordinated elements working together — not just a title and one equation.
+- Every object earns its place; remove clutter rather than adding filler.
+- Close on intentional ambient motion, not a frozen frame.
+"""
+
+
+def _cinematic_budget(tier: Tier) -> str:
+    surface = "allowed when they serve the concept (keep Surface resolution ≤ (32, 64))" if tier.allow_surface else "avoid Surface/ParametricSurface"
+    threed = "allowed" if tier.allow_3d else "avoid"
+    return f"""## PERFORMANCE ENVELOPE (tier: {tier.name} — capable hardware, be ambitious but clean)
+You have generous resources. Prioritize a polished, correct, readable animation over raw object count.
+- Updaters (`always_redraw`/`add_updater`): up to {tier.max_updaters}. Prefer `ValueTracker` + `always_redraw` for live parameters.
+- 3D (`ThreeDScene`): {threed}. Surfaces: {surface}.
+- Keep within roughly {tier.point_budget} "effort points" of complexity so the render stays stable — an elegant frame beats a crowded one.
+- A crowded or overlapping frame is a defect. When unsure, compose more carefully rather than adding more objects.
+"""
+
+
+def _constrained_budget() -> str:
+    """The strict 8 GB-laptop budget (today's behavior)."""
+    return "\n\n".join([STYLE_DIRECTIVES, HARDWARE_BUDGET, ANTI_LAZY, HARDWARE_3D_LIMITS])
+
+
+def _style_and_budget_sections(tier: Tier) -> list[str]:
+    """Return the tier-appropriate style + performance sections."""
+    if tier.name == "constrained":
+        return [_constrained_budget()]
+    return [CINEMATIC_STYLE, _cinematic_budget(tier), ANTI_LAZY_CINEMATIC]
+
+
+def budget_block(tier: Tier | None = None) -> str:
+    """Return just the tier's performance envelope (no full style block).
+
+    Used by formats with their own style rules (e.g. TikTok) that still need to
+    respect the hardware budget — previously these dropped the budget entirely.
+    """
+    tier = tier or get_tier()
+    if tier.name == "constrained":
+        return HARDWARE_BUDGET + "\n\n" + HARDWARE_3D_LIMITS
+    return _cinematic_budget(tier)
+
+
 # ── Fix/repair prompts ───────────────────────────────────────────────────────
 
 FIX_INTRO = """Previous Manim script failed with this error:
@@ -144,6 +215,7 @@ def _assess_complexity(prompt: str) -> str:
     complex_keywords = [
         "compare", "relationship", "transform", "series", "matrix",
         "surface", "fourier", "eigen", "convergence", "integral",
+        "derivative", "graph", "tangent", "slope", "gradient",
     ]
     has_complex = any(kw in prompt.lower() for kw in complex_keywords)
 
@@ -154,12 +226,20 @@ def _assess_complexity(prompt: str) -> str:
     return "MEDIUM"
 
 
-def build_complexity_modifier(prompt: str) -> str:
+def build_complexity_modifier(prompt: str, tier: Tier | None = None) -> str:
+    tier = tier or get_tier()
     level = _assess_complexity(prompt)
+    if tier.name == "constrained":
+        if level == "SIMPLE":
+            return "## Simple concept\n2-3 layers, 12-18 seconds. Quality over quantity."
+        elif level == "COMPLEX":
+            return "## Multi-concept scene\nUp to 3 layers, 20-25 seconds. Still respect ALL hardware limits."
+        return ""
+    # Capable tiers — scale ambition with complexity.
     if level == "SIMPLE":
-        return "## Simple concept\n2-3 layers, 12-18 seconds. Quality over quantity."
+        return "## Simple concept\nKeep it focused (15-22s), but still beautifully composed and polished."
     elif level == "COMPLEX":
-        return "## Multi-concept scene\nUp to 3 layers, 20-25 seconds. Still respect ALL hardware limits."
+        return "## Multi-concept scene\nDevelop it fully: multiple coordinated beats, 25-40s, deliberate composition and camera work where it helps."
     return ""
 
 
@@ -167,9 +247,11 @@ def build_complexity_modifier(prompt: str) -> str:
 
 SCENE_PLAN_SYSTEM_PROMPT = """Plan a Manim animation scene layout as JSON. Output ONLY valid JSON.
 
+Every object MUST include all of these fields: id, type, role, position, priority, visible_from, visible_to.
+
 {
   "objects": [
-    {"id": "name", "type": "Text|MathTex|Circle|...", "position": "top|center|bottom|left|right", "priority": 1, "visible_from": 0, "visible_to": 15}
+    {"id": "name", "type": "Text|MathTex|Circle|...", "role": "background|primary|annotation", "position": "top|center|bottom|left|right", "priority": 1, "visible_from": 0, "visible_to": 15}
   ],
   "phases": [
     {"name": "intro", "time": [0, 3], "visible": ["title", "bg"], "action": "FadeIn"}
@@ -177,9 +259,8 @@ SCENE_PLAN_SYSTEM_PROMPT = """Plan a Manim animation scene layout as JSON. Outpu
 }
 
 Rules:
-- Max 3 objects visible simultaneously
+- role: "background" = grid/atmosphere, "primary" = the main mathematical object, "annotation" = labels/arrows/highlights
 - priority: 1=essential, 2=important, 3=decoration
-- Max 5 objects total
 - Each phase transitions cleanly (old out, new in)
 """
 
@@ -189,10 +270,14 @@ def build_manim_system_prompt(
     theme_instructions: str = "",
     prompt: str = "",
     scene_plan: str = "",
+    tier: Tier | None = None,
 ) -> str:
-    """Build system prompt for code generation."""
-    sections = [BASE_MANIM_RULES, STYLE_DIRECTIVES, HARDWARE_BUDGET, SCENE_AWARENESS, ANTI_LAZY]
-    complexity = build_complexity_modifier(prompt) if prompt else ""
+    """Build the tier-aware system prompt for code generation."""
+    tier = tier or get_tier()
+    sections = [BASE_MANIM_RULES]
+    sections.extend(_style_and_budget_sections(tier))
+    sections.append(SCENE_AWARENESS)
+    complexity = build_complexity_modifier(prompt, tier) if prompt else ""
     if complexity:
         sections.append(complexity)
     if scene_plan:
@@ -206,27 +291,21 @@ def build_scene_plan_prompt() -> str:
     return SCENE_PLAN_SYSTEM_PROMPT
 
 
-def build_layout_repair_prompt(issues: str, theme_instructions: str = "", prompt: str = "") -> str:
+def build_layout_repair_prompt(issues: str, theme_instructions: str = "", prompt: str = "", tier: Tier | None = None) -> str:
+    tier = tier or get_tier()
     safe_issues = issues.replace("{", "{{").replace("}", "}}")
-    sections = [
-        LAYOUT_REPAIR_INTRO.format(issues=safe_issues),
-        BASE_MANIM_RULES,
-        STYLE_DIRECTIVES,
-        HARDWARE_BUDGET,
-    ]
+    sections = [LAYOUT_REPAIR_INTRO.format(issues=safe_issues), BASE_MANIM_RULES]
+    sections.extend(_style_and_budget_sections(tier))
     if theme_instructions:
         sections.append(theme_instructions)
     return "\n\n".join(sections)
 
 
-def build_manim_fix_prompt(error: str, theme_instructions: str = "", prompt: str = "") -> str:
+def build_manim_fix_prompt(error: str, theme_instructions: str = "", prompt: str = "", tier: Tier | None = None) -> str:
+    tier = tier or get_tier()
     safe_error = error.replace("{", "{{").replace("}", "}}")
-    sections = [
-        FIX_INTRO.format(error=safe_error),
-        BASE_MANIM_RULES,
-        STYLE_DIRECTIVES,
-        HARDWARE_BUDGET,
-    ]
+    sections = [FIX_INTRO.format(error=safe_error), BASE_MANIM_RULES]
+    sections.extend(_style_and_budget_sections(tier))
     if theme_instructions:
         sections.append(theme_instructions)
     return "\n\n".join(sections)

@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from prompt_builder import _assess_complexity, build_complexity_modifier
+from render_tier import CONSTRAINED, CINEMATIC
 
 
 # ── SIMPLE prompts ───────────────────────────────────────────────────────────
@@ -62,22 +63,31 @@ def test_complex_multiple_concepts():
 
 # ── Complexity modifier ─────────────────────────────────────────────────────
 
-def test_modifier_simple_contains_adjustment():
-    result = build_complexity_modifier("draw circle")
-    assert "Complexity Adjustment" in result
-    assert "3 visual layers" in result
+def test_modifier_simple_constrained():
+    result = build_complexity_modifier("draw circle", CONSTRAINED)
+    assert "Simple concept" in result
 
 
-def test_modifier_complex_contains_note():
+def test_modifier_complex_constrained():
     result = build_complexity_modifier(
-        "compare the convergence of gradient descent across multiple loss landscapes"
+        "compare the convergence of gradient descent across multiple loss landscapes",
+        CONSTRAINED,
     )
-    assert "Complexity Note" in result
-    assert "5 visual layers" in result
+    assert "Multi-concept" in result
+
+
+def test_modifier_complex_cinematic_is_ambitious():
+    # Capable tier should not tell the model to "respect ALL hardware limits".
+    result = build_complexity_modifier(
+        "compare the convergence of gradient descent across multiple loss landscapes",
+        CINEMATIC,
+    )
+    assert "Multi-concept" in result
+    assert "hardware limits" not in result
 
 
 def test_modifier_medium_empty():
-    result = build_complexity_modifier("probability of coin flip animation")
+    result = build_complexity_modifier("probability of coin flip animation", CONSTRAINED)
     assert result == ""
 
 

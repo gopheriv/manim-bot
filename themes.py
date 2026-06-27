@@ -21,6 +21,9 @@ class Theme:
     palette_desc: str      # natural language color palette description
     extra_instructions: str = ""
     post_effects: str = ""  # reserved for future ffmpeg filters
+    # Structured palette (primary, accent/insight, transform, contrast, text).
+    # Used to make deterministic templates follow the active theme.
+    colors: list[str] = field(default_factory=list)
 
 
 # ── Theme Definitions ────────────────────────────────────────────────────────
@@ -38,6 +41,7 @@ NORD = Theme(
         "Prefer simple geometric shapes. Use thin lines (stroke_width=2). "
         "Text should use the Frost palette (#E5E9F0)."
     ),
+    colors=["#88C0D0", "#EBCB8B", "#81A1C1", "#BF616A", "#ECEFF4"],
 )
 
 CYBERPUNK = Theme(
@@ -56,6 +60,7 @@ CYBERPUNK = Theme(
         "using .set_stroke(opacity=0.3, width=10) on a copy. "
         "Text should be bold and bright."
     ),
+    colors=["#FF007F", "#00FFFF", "#BF00FF", "#FFFF00", "#FFFFFF"],
 )
 
 CHALKBOARD = Theme(
@@ -74,6 +79,7 @@ CHALKBOARD = Theme(
         "where possible."
     ),
     post_effects="shake",  # will apply ffmpeg shake filter
+    colors=["#F5F5DC", "#D4C89A", "#C17C74", "#A3BE8C", "#F5F5DC"],
 )
 
 VISUAL_MATH = Theme(
@@ -93,6 +99,7 @@ VISUAL_MATH = Theme(
         "The style should evoke high-end mathematical explainers without copying any "
         "specific creator's branding, logo, assets, or exact scenes."
     ),
+    colors=["#58C4DD", "#F5D547", "#2DD4BF", "#FF6B6B", "#F8FAFC"],
 )
 
 DEFAULT = Theme(
@@ -103,6 +110,7 @@ DEFAULT = Theme(
         "white for text, blue (#58C4DD) and yellow (#FFFF00) for accents, "
         "green (#83C167) and red (#FC6255) for highlights."
     ),
+    colors=["#58C4DD", "#FFFF00", "#83C167", "#FC6255", "#FFFFFF"],
 )
 
 

@@ -4,5 +4,8 @@
     "theme": "nord",
     "voiceover_enabled": true,
     "quality": "-ql"
+  },
+  "999001": {
+    "theme": "nord"
   }
 }

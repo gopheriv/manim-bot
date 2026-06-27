@@ -84,11 +84,16 @@ def _categorize_error(error: str) -> str:
     return "unknown"
 
 
-def get_adaptive_prompt_modifiers() -> str:
+def get_adaptive_prompt_modifiers(constrained: bool = True) -> str:
     """Generate prompt modifiers based on recent error patterns.
 
     Returns a string of instructions to add to the system prompt to avoid
     common errors observed in the last 7 days.
+
+    Args:
+        constrained: when False (capable render tier), the "keep the scene
+            lightweight" memory-pressure modifier is omitted so it doesn't
+            suppress ambition on hardware that can handle heavy scenes.
     """
     data = _load()
     if not data:
@@ -126,7 +131,7 @@ def get_adaptive_prompt_modifiers() -> str:
         modifiers.append(
             "CRITICAL: Check Python syntax before output — matching quotes, parentheses, colons."
         )
-    if counter.get("memory_error", 0) >= 1:
+    if constrained and counter.get("memory_error", 0) >= 1:
         modifiers.append(
             "CRITICAL: Keep scene lightweight — max 3 updaters, no Surface rendering, max 10 self.play calls, no glow effects."
         )

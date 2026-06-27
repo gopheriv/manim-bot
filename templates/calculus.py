@@ -59,7 +59,7 @@ for n in [4, 8, 16, 32]:
 
     self.play(FadeIn(rects, run_time=1))
 
-    area_label = MathTex(f"n = {{n}},\\; S = {{sum(f(i*dx)*dx for i in range(n)):.2f}}", font_size=24)
+    area_label = MathTex(rf"n = {{n}},\\; S = {{sum(f(i*dx)*dx for i in range(n)):.2f}}", font_size=24)
     area_label.to_corner(DL)
     self.play(FadeIn(area_label), run_time=0.5)
     self.wait(0.5)
@@ -67,7 +67,7 @@ for n in [4, 8, 16, 32]:
 
 # True area
 true_area = 4**3/12 + 0.5*4  # integral of x^2/4 + 0.5 from 0 to 4
-final_label = Text(f"\\u222b_0^4 f(x) dx = {{true_area:.2f}}", font_size=28, color="#10B981")
+final_label = MathTex(r"\\int_0^4 f(x)\\,dx = " + f"{{true_area:.2f}}", font_size=30, color="#10B981")
 final_label.to_corner(DL)
 self.play(Write(final_label, run_time=1))
 

@@ -15,6 +15,7 @@ from typing import Callable
 import psutil
 
 from config import MANIM_QUALITY
+from render_tier import Tier, get_tier
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,15 @@ class SceneWeight:
     mitigations: list[str]
 
 
-def _estimate_scene_weight(code: str) -> SceneWeight:
+def _estimate_scene_weight(code: str, tier: Tier | None = None) -> SceneWeight:
     """Analyze Manim code to estimate render weight and suggest mitigations.
 
-    Thresholds tuned for i5-1155G7 8GB RAM:
-    - score < 20: light — no mitigation needed
-    - score 20-40: medium — quality downgrade
-    - score >= 40: heavy — aggressive simplification + fps reduction
+    The "heavy" threshold scales with the active render tier: a scene that is
+    heavy on the 8 GB laptop (constrained, threshold 40) is comfortably light on
+    a cinematic box (threshold 120). Only when the score exceeds the tier
+    threshold do we downgrade/limit.
     """
+    tier = tier or get_tier()
     score = 0
     mitigations: list[str] = []
 
@@ -71,23 +73,24 @@ def _estimate_scene_weight(code: str) -> SceneWeight:
     score += transform_count * 3     # Morphing adds intermediate frames
     score += max(0, estimated_frames - 200)  # Penalize >200 frames
 
-    if score >= 40:
+    threshold = tier.weight_threshold
+    is_heavy = score >= threshold
+    if is_heavy:
         mitigations = [
-            f"HEAVY scene (score {score}/100): auto-downgrading to -ql 480p",
-            "Reducing Manim internal frame rate to 15 fps",
+            f"HEAVY scene (score {score}, tier {tier.name} threshold {threshold}): "
+            f"downgrading to {tier.downgrade_quality} @ {tier.downgrade_fps}fps",
             "Disabling caching to prevent memory buildup",
-            "Setting process to BELOW_NORMAL priority",
         ]
-    elif score > 20:
-        mitigations = [
-            f"MEDIUM scene (score {score}/100): keeping user quality",
-        ]
+        if tier.below_normal_priority:
+            mitigations.append("Setting process to BELOW_NORMAL priority")
+    elif score > threshold * 0.5:
+        mitigations = [f"MEDIUM scene (score {score}, tier {tier.name}): keeping quality"]
     else:
-        mitigations = [f"LIGHT scene (score {score}/100): no mitigation needed"]
+        mitigations = [f"LIGHT scene (score {score}, tier {tier.name}): no mitigation needed"]
 
     return SceneWeight(
         score=score,
-        is_heavy=score >= 40,
+        is_heavy=is_heavy,
         mitigations=mitigations,
     )
 
@@ -126,12 +129,15 @@ async def render(
     tiktok_mode: bool = False,
     cancel_event: asyncio.Event | None = None,
     progress_cb: ProgressCallback | None = None,
+    tier: Tier | None = None,
 ) -> Path | None:
     """Write Manim code to a temp file and render it.
 
     Args:
         progress_cb: Called with (pct, animation_name) as Manim renders.
+        tier: Active render tier (defaults to the auto-detected tier).
     """
+    tier = tier or get_tier()
     mem = psutil.virtual_memory()
     if mem.percent > 85:
         render._last_error = (
@@ -143,17 +149,24 @@ async def render(
 
     scene_file = _write_scene(code, chat_id)
 
-    # ── Heavy scene detection + auto-mitigation ──
-    weight = _estimate_scene_weight(code)
+    # ── Heavy scene detection + tier-aware auto-mitigation ──
+    weight = _estimate_scene_weight(code, tier)
     for m in weight.mitigations:
         logger.info(f"[Scene weight] {m}")
 
-    # Auto-downgrade quality for heavy scenes
-    quality_flag = quality or MANIM_QUALITY
+    # Normal scenes render at the requested (or tier-default) quality + tier fps.
+    quality_flag = quality or tier.default_quality
+    fps_value = tier.fps
     if weight.is_heavy:
-        quality_flag = "-ql"  # Force 480p — better to render than crash
-        if quality and quality != "-ql":
-            logger.info(f"Auto-downgraded quality from {quality} to -ql (heavy scene)")
+        # Downgrade toward the tier's heavy target (NOT always 480p — a cinematic
+        # tier stays at 1080p, only constrained drops to 480p).
+        if quality_flag != tier.downgrade_quality:
+            logger.info(
+                "Auto-downgraded quality from %s to %s (heavy scene, tier %s)",
+                quality_flag, tier.downgrade_quality, tier.name,
+            )
+        quality_flag = tier.downgrade_quality
+        fps_value = tier.downgrade_fps
         # Disable caching for heavy scenes — prevents memory buildup from cached frames
         disable_cache = True
 
@@ -182,9 +195,12 @@ async def render(
     if disable_cache:
         cmd_args.append("--disable_caching")
         logger.info("Caching disabled for heavy scene (prevents memory buildup)")
-    if weight.is_heavy:
-        cmd_args.extend(["--fps", "15"])
-        logger.info("FPS reduced to 15 for heavy scene (lowers frame count and RAM pressure)")
+    # Always pass an explicit fps so output is never silently 15fps — the value
+    # comes from the tier (full fps for normal scenes, reduced only when heavy).
+    cmd_args.extend(["--fps", str(fps_value)])
+    logger.info(
+        "Render fps=%d (tier %s%s)", fps_value, tier.name, ", heavy" if weight.is_heavy else ""
+    )
 
     cmd_args.extend([
         "--media_dir", str(RENDER_DIR / "media"),
@@ -196,7 +212,8 @@ async def render(
     # Process flags: CREATE_NO_WINDOW always, BELOW_NORMAL for heavy scenes
     CREATE_NO_WINDOW = 0x08000000
     BELOW_NORMAL_PRIORITY = 0x00004000
-    creation_flags = CREATE_NO_WINDOW | (BELOW_NORMAL_PRIORITY if weight.is_heavy else 0)
+    use_low_priority = weight.is_heavy and tier.below_normal_priority
+    creation_flags = CREATE_NO_WINDOW | (BELOW_NORMAL_PRIORITY if use_low_priority else 0)
 
     proc = None
     try:
