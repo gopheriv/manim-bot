@@ -23,7 +23,7 @@ A = {{
     {config.extra_params.get('a21', 1)}: float,
     {config.extra_params.get('a22', 3)}: float,
 }}
-matrix_tex = MathTex(r"A = \\begin{pmatrix} 2 & 1 \\ 1 & 3 \\end{pmatrix}", font_size=32, color=WHITE)
+matrix_tex = MathTex(r"A = \\\\begin{{pmatrix}} 2 & 1 \\\\ 1 & 3 \\\\end{{pmatrix}}", font_size=32, color=WHITE)
 matrix_tex.to_edge(UP, buff=1)
 self.play(Write(title, run_time=1.5), Write(matrix_tex, run_time=1.5))
 
@@ -44,7 +44,7 @@ eigen_arrows = VGroup()
 eigen_labels = VGroup()
 for eigenval, eigenvec in eigen_pairs:
     vec_line = Arrow(ORIGIN, 2.5 * eigenvec[:2], buff=0, color="#10B981", stroke_width=3)
-    val_label = MathTex(f"\\lambda = {eigenval:.2f}", font_size=24, color="#10B981")
+    val_label = MathTex(f"\\lambda = {{eigenval:.2f}}", font_size=24, color="#10B981")
     val_label.next_to(vec_line.get_end(), RIGHT + UP)
     eigen_arrows.add(vec_line)
     eigen_labels.add(val_label)
@@ -94,9 +94,9 @@ self.play(Write(eq, run_time=1.5))
 
 # Show decomposition steps
 steps = [
-    (r"\\text{Rotation } V^T", "{color}", "Rotate"),
-    (r"\\text{Scaling } \\Sigma", "#10B981", "Scale"),
-    (r"\\text{Rotation } U", "#F59E0B", "Rotate"),
+    (r"\\text{{Rotation }} V^T", "{color}", "Rotate"),
+    (r"\\text{{Scaling }} \\Sigma", "#10B981", "Scale"),
+    (r"\\text{{Rotation }} U", "#F59E0B", "Rotate"),
 ]
 
 grid = NumberPlane(x_range=[-3, 3], y_range=[-2, 2], faded_line_ratio=2)

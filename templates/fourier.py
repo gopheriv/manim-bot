@@ -78,7 +78,7 @@ self.play(Write(title, run_time=1.5))
 a = {config.extra_params.get('damping', 0.5)}
 w = {config.frequency}
 
-eq_time = MathTex(f"f(t) = e^{{-{a}t}} \\\\sin({w}t)", font_size=32)
+eq_time = MathTex(f"f(t) = e^{{-{{a}}t}} \\\\sin({{w}}t)", font_size=32)
 eq_time.to_edge(UP, buff=1)
 self.play(Write(eq_time, run_time=1.5))
 
@@ -97,7 +97,7 @@ time_curve.set_stroke(width=2)
 self.play(Create(time_curve, run_time=2))
 
 # Frequency domain (magnitude plot)
-eq_freq = MathTex(r"F(s) = \frac{{{w}}}{{(s + {a})^2 + {w}^2}}", font_size=28)
+eq_freq = MathTex(r"F(s) = \\frac{{w}}{{(s + a)^2 + w^2}}", font_size=28)
 eq_freq.to_edge(RIGHT, buff=2)
 self.play(Write(eq_freq, run_time=1.5))
 

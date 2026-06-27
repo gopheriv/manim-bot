@@ -120,9 +120,9 @@ cycle = Polygon(*cycle_points[:4], fill_color="{color}", fill_opacity=0.2, strok
 
 # Efficiency
 eff = 1 - T_cold / T_hot
-eff_eq = MathTex(r"\\eta = 1 - \\frac{{T_C}}{{T_H}} = {eff:.2f}", font_size=28, color="#10B981")
-eff_eq.to_corner(UR)
-self.play(Create(cycle, run_time=2), Write(eff_eq, run_time=1.5))
+eff_label = Text(f"\\u03b7 = 1 - T_C/T_H = {{eff:.2f}}", font_size=28, color="#10B981")
+eff_label.to_corner(UR)
+self.play(Create(cycle, run_time=2), Write(eff_label, run_time=1.5))
 
 self.wait(2)
 """)

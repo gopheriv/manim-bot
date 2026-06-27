@@ -48,14 +48,14 @@ for i, n in enumerate(samples):
     dist.set_stroke(width=2)
     self.play(Create(dist, run_time=1))
 
-    n_label = MathTex(f"n = {n}", font_size=24, color=colors[i % len(colors)])
+    n_label = MathTex(f"n = {{n}}", font_size=24, color=colors[i % len(colors)])
     n_label.to_corner(UR)
     self.play(FadeIn(n_label), run_time=0.3)
     self.wait(0.3)
     self.play(FadeOut(n_label), run_time=0.2)
 
 # Final bell curve
-eq = MathTex(r"\\bar{X}_n \\xrightarrow{d} \\mathcal{N}(\\mu, \\sigma^2/n)", font_size=28)
+eq = MathTex(r"\\bar{{{{X}}}}_n \\xrightarrow{{d}} \\mathcal{{N}}(\\mu, \\sigma^2/n)", font_size=28)
 eq.to_edge(UP, buff=1)
 self.play(Create(bell, run_time=2), Write(eq, run_time=1.5))
 
