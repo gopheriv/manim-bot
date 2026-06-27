@@ -49,6 +49,7 @@ from feedback import log_feedback
 from watermark import add_watermark
 from prompt_enhancer import enhance_prompt
 from critic_agent import critique_code, static_quality_check
+from judge_ai import judge_code, repair_by_judge, JudgeVerdict, JudgeReview
 from error_learner import log_error, get_adaptive_prompt_modifiers
 from edu_reviewer import review_education
 from course_generator import generate_course
@@ -441,11 +442,113 @@ async def _send_animation(
                 logger.warning(f"Education review failed (non-fatal): {e}")
                 edu_review = None
 
-            # в"Ђв"Ђ Parallel: render + narration generation в"Ђв"Ђ
-            render_start = datetime.now()
+            # ── Judge of AI Court: code review with verdict (MiniMax M3) ──
+            static_issues = static_checks.get("issues", []) if static_checks else []
+            judge_iteration = 0
+            judge_review: JudgeReview | None = None
 
-            # Status message that gets updated with real Manim progress
-            status_msg = await message.reply("рџЋ¬ Preparing renderвЂ¦")
+            # Create status message early so Judge can update it
+            status_msg = await message.reply("🎬 Preparing render…")
+
+            while judge_iteration < 2:  # max 2 iterations
+                judge_iteration += 1
+
+                await _safe_edit(
+                    status_msg,
+                    "⚖️ *Judge reviewing…*\n_Iteration {}/2_".format(judge_iteration)
+                )
+
+                judge_review = await judge_code(
+                    code,
+                    prompt,
+                    critic_review=review,
+                    static_issues=static_issues,
+                    iteration=judge_iteration,
+                )
+
+                logger.info(
+                    f"Judge #{judge_iteration}: {judge_review.verdict.value}, "
+                    f"score={judge_review.score:.1f}, "
+                    f"critical={len(judge_review.critical_issues)}, "
+                    f"warnings={len(judge_review.warnings)}"
+                )
+
+                if judge_review.verdict == JudgeVerdict.ACCEPT:
+                    logger.info("Judge ACCEPTED code for render")
+                    await _safe_edit(
+                        status_msg,
+                        "✅ *Judge approved* (score: {}/10)\n_Preparing render…".format(
+                            judge_review.score
+                        )
+                    )
+                    break
+
+                if judge_review.verdict == JudgeVerdict.REPAIR and judge_iteration < 2:
+                    # Send back to generator for repair
+                    await _safe_edit(
+                        status_msg,
+                        "🔧 *Judge found {} issues*\n_Repairing (iteration {}/2)_".format(
+                            len(judge_review.critical_issues), judge_iteration
+                        )
+                    )
+                    logger.info(
+                        f"Judge REPAIR: {len(judge_review.repair_instructions)} fixes, "
+                        f"sending to generator"
+                    )
+                    try:
+                        code = await repair_by_judge(code, prompt, judge_review)
+                        logger.info("Code repaired, re-judging…")
+                    except Exception as e:
+                        logger.error(f"Judge-driven repair failed: {e}")
+                        # If repair fails, still try to render original (fail-safe)
+                        await _safe_edit(
+                            status_msg,
+                            "⚠️ *Repair failed*\n_Rendering as-is…"
+                        )
+                        break
+
+                elif judge_review.verdict == JudgeVerdict.REJECT and judge_iteration < 2:
+                    # Full regeneration
+                    await _safe_edit(
+                        status_msg,
+                        "❌ *Judge rejected*\n_Regenerating from scratch (iteration {}/2)_".format(judge_iteration)
+                    )
+                    logger.info(
+                        f"Judge REJECT: {judge_review.regenerate_reason}, "
+                        f"regenerating code"
+                    )
+                    try:
+                        code = await generate_manim_code(
+                            prompt + "\n\nAVOID: " + "; ".join(judge_review.critical_issues[:3])
+                        )
+                        if "class GenScene" not in code or "def construct" not in code:
+                            logger.warning("Regenerated code missing structure, trying layout repair")
+                            try:
+                                repaired = await repair_layout(
+                                    code,
+                                    ["Missing GenScene class or construct method"],
+                                    original_prompt=prompt,
+                                )
+                                if "class GenScene" in repaired and "def construct" in repaired:
+                                    code = repaired
+                            except Exception:
+                                pass
+                        logger.info("Code regenerated, re-judging…")
+                    except Exception as e:
+                        logger.error(f"Code regeneration failed: {e}")
+                        await _safe_edit(
+                            status_msg,
+                            "⚠️ *Regeneration failed*\n_Rendering as-is…"
+                        )
+                        break
+                else:
+                    # Max iterations reached or unknown verdict — fail-safe
+                    if judge_review:
+                        await _safe_edit(
+                            status_msg,
+                            "⚠️ *Judge max iterations reached*\n_Rendering as-is…"
+                        )
+                    break
 
             # Check scene weight before rendering (for user info)
             from renderer import _estimate_scene_weight

@@ -48,6 +48,13 @@ CLAUDE_MODEL = _get("CLAUDE_MODEL", "claude-opus-4-8")
 # ── LLM Provider switch: qwen or claude ─────────────────────────────────────
 LLM_PROVIDER = _get("LLM_PROVIDER", "qwen").lower()
 
+# ── Judge of AI Court (MiniMax M3 — separate model from generator) ───────────
+JUDGE_BASE_URL = _get("JUDGE_BASE_URL", "")
+JUDGE_API_KEY = _get("JUDGE_API_KEY", "")
+JUDGE_MODEL = _get("JUDGE_MODEL", "MiniMax-M3")
+JUDGE_TIMEOUT = _getint("JUDGE_TIMEOUT", 60)
+JUDGE_MAX_ITERATIONS = _getint("JUDGE_MAX_ITERATIONS", 2)
+
 # ── Manim rendering ─────────────────────────────────────────────────────────
 MANIM_QUALITY = _get("MANIM_QUALITY", "-qm")
 MANIM_TIMEOUT = _getint("MANIM_TIMEOUT", 600)  # 10 minutes
