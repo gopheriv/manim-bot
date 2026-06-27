@@ -76,9 +76,16 @@ def set_provider(provider: str) -> None:
     _active_provider = provider
 
 
-def _build_extra_body() -> dict:
-    """Build extra_body params for Qwen 3.7 Max (DashScope) — non-thinking calls."""
-    return {"enable_thinking": False}
+def _is_qwen_provider() -> bool:
+    """True when the coding client targets DashScope (Qwen), which supports enable_thinking."""
+    return "dashscope" in (GPT_BASE_URL or "").lower()
+
+
+def _build_extra_body(enable_thinking: bool = False) -> dict:
+    """Build extra_body params — only for DashScope/Qwen. Other providers ignore this."""
+    if not _is_qwen_provider():
+        return {}
+    return {"enable_thinking": enable_thinking}
 
 
 async def _codegen_stream(messages: list[dict], max_tokens: int, timeout: int, enable_thinking: bool) -> tuple[str, str]:
@@ -88,13 +95,14 @@ async def _codegen_stream(messages: list[dict], max_tokens: int, timeout: int, e
     chain-of-thought in `reasoning_content` (which we discard) and the answer in
     `content` (which we keep).
     """
+    extra = _build_extra_body(enable_thinking)
     stream = await gpt_coding_client.chat.completions.create(
         model=GPT_MODEL,
         messages=messages,
         max_tokens=max_tokens,
         timeout=timeout,
         stream=True,
-        extra_body={"enable_thinking": enable_thinking},
+        **({"extra_body": extra} if extra else {}),
     )
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -134,12 +142,13 @@ async def _codegen_complete(messages: list[dict], max_tokens: int | None = None,
         except Exception as e:
             logger.warning(f"Thinking code-gen failed ({e}); falling back to non-thinking")
 
+    fallback_extra = _build_extra_body(False)
     response = await gpt_coding_client.chat.completions.create(
         model=GPT_MODEL,
         messages=messages,
         max_tokens=max_tokens,
         timeout=timeout,
-        extra_body={"enable_thinking": False},
+        **({"extra_body": fallback_extra} if fallback_extra else {}),
     )
     return response.choices[0].message.content or ""
 

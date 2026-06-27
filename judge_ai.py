@@ -37,6 +37,7 @@ from config import (
     JUDGE_PROVIDER,
     JUDGE_TIMEOUT,
     CLAUDE_API_KEY,
+    QWEN_API_KEY,
 )
 from critic_agent import CriticReview
 
@@ -49,6 +50,13 @@ judge_client = AsyncOpenAI(
     base_url=JUDGE_BASE_URL or None,
     timeout=JUDGE_TIMEOUT,
 )
+
+
+def _get_qwen_extra_body() -> dict:
+    """Return enable_thinking only when the judge endpoint is DashScope (Qwen)."""
+    if "dashscope" in (JUDGE_BASE_URL or "").lower():
+        return {"enable_thinking": False}
+    return {}
 
 
 # ── Verdict enum ─────────────────────────────────────────────────────────────
@@ -111,14 +119,18 @@ Be specific; "Line N" references are valued. If you are unsure whether something
 # ── Model routing — strongest available judge ────────────────────────────────
 
 def _resolve_provider() -> str | None:
-    """Return 'claude', 'openai', or None (no judge configured)."""
+    """Return 'claude', 'qwen', 'openai', or None (no judge configured)."""
     if JUDGE_PROVIDER == "claude":
         return "claude" if CLAUDE_API_KEY else None
+    if JUDGE_PROVIDER == "qwen":
+        return "qwen" if QWEN_API_KEY else None
     if JUDGE_PROVIDER == "openai":
         return "openai" if (JUDGE_BASE_URL and JUDGE_API_KEY) else None
     # auto: prefer the strongest model when available
     if CLAUDE_API_KEY:
         return "claude"
+    if QWEN_API_KEY:
+        return "qwen"
     if JUDGE_BASE_URL and JUDGE_API_KEY:
         return "openai"
     return None
@@ -143,6 +155,22 @@ async def _judge_complete(system_prompt: str, user_message: str) -> str:
             max_tokens=2048,
         )
         return (response.content[0].text or "").strip()
+
+    if provider == "qwen":
+        from llm import qwen_client
+        qwen_extra = _get_qwen_extra_body()
+        response = await qwen_client.chat.completions.create(
+            model=JUDGE_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+            timeout=JUDGE_TIMEOUT,
+            **({"extra_body": qwen_extra} if qwen_extra else {}),
+        )
+        return (response.choices[0].message.content or "").strip()
 
     if provider == "openai":
         response = await judge_client.chat.completions.create(

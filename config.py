@@ -29,6 +29,7 @@ BOT_TOKEN = _get("TELEGRAM_BOT_TOKEN")
 
 # ── LLM: DashScope (Qwen 3.6 Plus for chat + vision) ──────────────────────
 DASHSCOPE_API_KEY = _get("OPENAI_API_KEY")
+QWEN_API_KEY = DASHSCOPE_API_KEY  # same DashScope key, for judge fallback
 CHAT_MODEL = _get("CHAT_MODEL", "qwen3.6-plus")
 LLM_BASE_URL = _get("LLM_BASE_URL", "")
 
