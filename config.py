@@ -38,7 +38,7 @@ GPT_API_KEY = _get("GPT_API_KEY", "")
 GPT_MODEL = _get("MANIM_MODEL", "qwen3.7-max")
 IMAGE_MODEL = _get("IMAGE_MODEL", "")
 GPT_REASONING_EFFORT = _get("GPT_REASONING_EFFORT", "")
-GPT_MAX_RETRIES = _getint("GPT_MAX_RETRIES", 0)
+GPT_MAX_RETRIES = _getint("GPT_MAX_RETRIES", 2)
 
 # ── LLM: Claude Opus 4.8 (Anthropic, for chat + vision) ────────────────────
 CLAUDE_BASE_URL = _get("CLAUDE_BASE_URL", "")

@@ -43,6 +43,20 @@ import settings as user_settings
 from themes import get_theme, next_theme, build_theme_prompt, THEME_ORDER
 from voiceover import add_voiceover
 from templates import get_registry
+from tiktok_integration import detect_tiktok_mode
+from prompt_builder_tiktok import get_tiktok_prompt
+from feedback import log_feedback
+from watermark import add_watermark
+from prompt_enhancer import enhance_prompt
+from critic_agent import critique_code, static_quality_check
+from error_learner import log_error, get_adaptive_prompt_modifiers
+from edu_reviewer import review_education
+from course_generator import generate_course
+from exam_prep import get_question_bank, get_random_question, generate_animation_for_question
+from gallery import GALLERY_CATALOG, get_featured, get_by_category, get_by_id, search as gallery_search, increment_view, increment_render
+from multi_agent_debate import debate_generate
+from referral import register_user, get_user_referral_info, get_referral_stats, use_bonus_render
+from teacher_dashboard import register_teacher, get_teacher_dashboard, get_engagement_stats
 
 # Ensure log directory exists before configuring handlers
 from pathlib import Path
@@ -226,9 +240,17 @@ async def _send_animation(
     is_3d: bool = False,
     quality: str | None = None,
     theme_name: str | None = None,
+    tiktok_mode: bool = False,
 ) -> None:
     """Full animation pipeline with queue, themes, self-healing, and caching."""
     chat_id = message.chat.id
+
+    # TikTok mode detection (auto-detect if not explicitly set)
+    if not tiktok_mode:
+        tiktok_mode = detect_tiktok_mode(prompt)
+
+    if tiktok_mode:
+        logger.info(f"TikTok mode activated for chat_id={chat_id}")
 
     # Rate limiting
     allowed, retry_after = rate_limiter.check_rate_limit(chat_id, "animate")
@@ -301,14 +323,32 @@ async def _send_animation(
                     )
 
             if not code:
+                # Enhance prompt for better code generation (skip if already template-matched)
+                # Only enhance if prompt is short/vague (< 15 words)
+                word_count = len(prompt.split())
+                if word_count < 15:
+                    await _safe_reply(message, "🔍 Enhancing your prompt for better quality...")
+                    prompt = await enhance_prompt(prompt, is_tiktok=tiktok_mode)
+                    logger.info(f"Prompt enhanced from {word_count} words: '{prompt[:100]}...'")
+
                 # Slow path: full LLM code generation
+                format_label = "📱 TikTok (9:16)" if tiktok_mode else f"🎨 Theme: **{theme.name}**"
                 await _safe_reply(message, (
                     f"🤖 Generating Manim code with **{GPT_MODEL}**…\n"
-                    f"🎨 Theme: **{theme.name}** | Quality: `{user_quality}`"
+                    f"{format_label} | Quality: `{user_quality}`"
                 ))
 
-                # Build theme-aware system prompt
-                theme_prompt = build_theme_prompt(theme)
+                # Build theme/format-specific prompt
+                if tiktok_mode:
+                    theme_prompt = get_tiktok_prompt(prompt)
+                else:
+                    theme_prompt = build_theme_prompt(theme)
+
+                # Add error pattern avoidance from recent failures
+                error_modifiers = get_adaptive_prompt_modifiers()
+                if error_modifiers:
+                    theme_prompt += error_modifiers
+                    logger.info("Error pattern modifiers added to prompt")
 
                 # ── Scene Awareness: plan → generate → validate → repair ──
                 # Step 1: Generate scene composition plan (non-fatal on failure)
@@ -373,7 +413,35 @@ async def _send_animation(
                 except Exception as e:
                     logger.warning(f"Layout repair failed (non-fatal): {e}")
 
-            # в”Ђв”Ђ Parallel: render + narration generation в”Ђв”Ђ
+            # ── Static quality checks (fast, no LLM cost) ──
+            static_checks = static_quality_check(code)
+            if static_checks["issues"]:
+                logger.info(f"Static checks: {len(static_checks['issues'])} issues")
+                for issue in static_checks["issues"]:
+                    logger.debug(f"  Static: {issue}")
+
+            # ── Critic Agent: pre-render quality scoring (non-fatal) ──
+            try:
+                review = await critique_code(code, prompt)
+                logger.info(f"Critic score: {review.overall:.1f}/10, issues={len(review.issues)}")
+                if review.needs_repair and review.issues:
+                    logger.info(f"Critic suggests repair: {review.issues[0]}")
+            except Exception as e:
+                logger.warning(f"Critique failed (non-fatal): {e}")
+                review = None
+
+            # ── Educational Reviewer: verify mathematical accuracy (non-fatal) ──
+            try:
+                edu_review = await review_education(code, prompt)
+                if not edu_review.is_correct:
+                    logger.warning(f"Education review found issues: {edu_review.issues}")
+                if edu_review.missing_concepts:
+                    logger.info(f"Missing concepts: {edu_review.missing_concepts}")
+            except Exception as e:
+                logger.warning(f"Education review failed (non-fatal): {e}")
+                edu_review = None
+
+            # в"Ђв"Ђ Parallel: render + narration generation в"Ђв"Ђ
             render_start = datetime.now()
 
             # Status message that gets updated with real Manim progress
@@ -398,7 +466,8 @@ async def _send_animation(
 
             render_coro = render(
                 code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
-                cancel_event=task.cancel_event, progress_cb=_on_manim_progress,
+                tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                progress_cb=_on_manim_progress,
             )
 
             if user_voiceover and VOICEOVER_ENABLED:
@@ -441,7 +510,8 @@ async def _send_animation(
                                 fixed_code = strip_code_fences(fixed_code)
                                 video_path = await render(
                                     fixed_code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
-                                    cancel_event=task.cancel_event, progress_cb=_on_manim_progress,
+                                    tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                                    progress_cb=_on_manim_progress,
                                 )
                                 if video_path:
                                     code = fixed_code
@@ -459,13 +529,18 @@ async def _send_animation(
                                         fixed_code = strip_code_fences(fixed_code)
                                         video_path = await render(
                                             fixed_code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
-                                            cancel_event=task.cancel_event, progress_cb=_on_manim_progress,
+                                            tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                                            progress_cb=_on_manim_progress,
                                         )
                                         if video_path:
                                             code = fixed_code
                                             break
                         except Exception as e:
                             logger.error(f"Self-healing attempt {heal_attempt} failed: {e}")
+
+                    # Log error pattern for learning (after all self-heal attempts exhausted)
+                    if video_path is None:
+                        log_error(prompt, render._last_error or "unknown", code)
 
             # Check cancellation again after self-heal
             if task.is_cancelled():
@@ -482,7 +557,8 @@ async def _send_animation(
                 fallback_code = build_fallback_scene(prompt, bg_color=theme.bg_color)
                 video_path = await render(
                     fallback_code, chat_id, timeout=min(MANIM_TIMEOUT, 180), quality="-ql",
-                    cancel_event=task.cancel_event, progress_cb=_on_manim_progress,
+                    tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                    progress_cb=_on_manim_progress,
                 )
                 if video_path:
                     code = fallback_code
@@ -507,6 +583,18 @@ async def _send_animation(
             render_time = (datetime.now() - render_start).total_seconds()
             analytics.log_render_success(chat_id, render_time)
 
+            # Add watermark (non-fatal)
+            try:
+                wm_dir = Path("tmp") / "watermark" / str(chat_id)
+                watermarked = await add_watermark(video_path, wm_dir)
+                if watermarked:
+                    video_path = watermarked
+                    logger.info("Watermark applied")
+                else:
+                    logger.warning("Watermark failed (non-fatal)")
+            except Exception as e:
+                logger.warning(f"Watermark error (non-fatal): {e}")
+
             # Voiceover merge (narration already generated in parallel)
             if narration and VOICEOVER_ENABLED:
                 try:
@@ -521,13 +609,28 @@ async def _send_animation(
                 except Exception as e:
                     logger.warning(f"Voiceover merge failed (non-fatal): {e}")
 
-            # Send result
+            # Send result with inline feedback buttons
             await bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
             reasoning_tag = f" | {GPT_REASONING_EFFORT} reasoning" if GPT_REASONING_EFFORT else ""
+            format_tag = " 📱 TikTok 9:16" if tiktok_mode else ""
             video_file = FSInputFile(str(video_path))
+
+            # Inline keyboard for feedback
+            feedback_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="👍 Great", callback_data=f"feedback:up:{task.task_id}"),
+                    InlineKeyboardButton(text="👎 Needs work", callback_data=f"feedback:down:{task.task_id}"),
+                ],
+                [
+                    InlineKeyboardButton(text="✏️ Edit this", callback_data=f"edit:{task.task_id}"),
+                    InlineKeyboardButton(text="📋 Code", callback_data=f"code:{task.task_id}"),
+                ],
+            ])
+
             sent = await message.reply_video(
                 video=video_file,
-                caption=f"рџЋ¬ `{GPT_MODEL}` | {theme.name}{reasoning_tag}",
+                caption=f"🎬 `{GPT_MODEL}` | {theme.name}{reasoning_tag}{format_tag}\n\n💬 Reply to this video with changes like _\"make it slower\"_ or _\"add more details\"_",
+                reply_markup=feedback_kb,
             )
 
             # Save to database
@@ -593,11 +696,105 @@ async def _generate_narration(prompt: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Handlers вЂ” Commands
+
+@dp.message(Command("tiktok"))
+async def cmd_tiktok(message: types.Message) -> None:
+    """Re-render the last animation in TikTok 9:16 format."""
+    chat_id = message.chat.id
+    last_render = db.get_last_render(chat_id)
+    if not last_render or not last_render.get("prompt"):
+        await _safe_reply(message, "No animation found. Render something first!")
+        return
+    original_prompt = last_render["prompt"]
+    await _safe_reply(message, "📱 Re-rendering in TikTok format (9:16, 25-30s)...")
+    await _send_animation(message, original_prompt, tiktok_mode=True)
+
+
+
+@dp.message(Command("draft"))
+async def cmd_draft(message: types.Message) -> None:
+    """Quick draft render of last animation at lowest quality."""
+    chat_id = message.chat.id
+    last_render = db.get_last_render(chat_id)
+    if not last_render or not last_render.get("prompt"):
+        await _safe_reply(message, "⚠️ No animation found. Render something first!")
+        return
+    original_prompt = last_render["prompt"]
+    await _safe_reply(message, "📝 Draft mode: quick preview at 480p, 60s timeout...")
+    await _send_animation(message, original_prompt, quality="-l")
+
+
+@dp.message(Command("export"))
+async def cmd_export(message: types.Message) -> None:
+    """Export last animation with TikTok-ready caption and hashtags."""
+    chat_id = message.chat.id
+    last_render = db.get_last_render(chat_id)
+    if not last_render:
+        await _safe_reply(message, "No animation found. Render something first!")
+        return
+    prompt = last_render.get("prompt", "")
+    hashtags = _generate_hashtags(prompt)
+    caption = f"{prompt[:80]}...\n\n{hashtags}\n\nMade with @Manim_is_so_useful_bot"
+    video_path = last_render.get("video_path")
+    if video_path and pathlib.Path(video_path).exists():
+        await message.reply_video(video=FSInputFile(video_path), caption=caption)
+    else:
+        await _safe_reply(message, f"TikTok-ready caption:\n\n{caption}")
+
+
+def _generate_hashtags(prompt: str) -> str:
+    """Generate relevant hashtags for TikTok/Reels export."""
+    p = prompt.lower()
+    base = "#MathExplained #LearnOnTikTok #STEM #Education #Animation"
+    topics = {
+        "fourier": "#Fourier #SignalProcessing",
+        "derivative": "#Calculus #Derivatives",
+        "integral": "#Calculus #Integrals",
+        "eigenvalue": "#LinearAlgebra",
+        "matrix": "#LinearAlgebra #Matrix",
+        "probability": "#Probability #Statistics",
+        "physics": "#Physics #Science",
+        "quantum": "#Quantum #Physics",
+        "oscillat": "#Oscillation #Waves",
+        "gradient": "#MachineLearning #AI",
+        "mandelbrot": "#Mandelbrot #Fractal",
+        "calculus": "#Calculus",
+        "taylor": "#TaylorSeries",
+    }
+    for kw, tags in topics.items():
+        if kw in p:
+            return f"{base} {tags}"
+    return base
+
+
 # ---------------------------------------------------------------------------
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
-    user_provider = user_settings.get(message.chat.id, "provider")
+    chat_id = message.chat.id
+
+    # Check for referral code in args: /start ABC12345
+    args = (message.text or "").replace("/start", "", 1).strip()
+    referred_by = None
+    bonus_msg = ""
+    if args and args.isalnum():
+        # Try to find who owns this referral code
+        from referral import _load
+        data = _load()
+        for uid, udata in data.get("users", {}).items():
+            if udata.get("referral_code", "").upper() == args.upper():
+                referred_by = int(uid)
+                break
+        if referred_by:
+            result = register_user(chat_id, referred_by=referred_by)
+            if result.get("bonus", 0) > 0:
+                bonus_msg = f"\n\n🎁 You and your friend each got +{result['bonus']} free renders!"
+        else:
+            register_user(chat_id)
+    else:
+        register_user(chat_id)
+
+    user_provider = user_settings.get(chat_id, "provider")
     provider_name = "Claude Opus 4.8" if user_provider == "claude" else "Qwen 3.6 Plus"
     models = (
         f"**Code gen**: `{GPT_MODEL}` (reasoning: `{GPT_REASONING_EFFORT or 'default'}`)\n"
@@ -620,7 +817,17 @@ async def cmd_start(message: types.Message) -> None:
         "• `/history` → your recent animations\n"
         "• `/stats` → global statistics\n"
         "• `/clean` → clear render cache\n"
-        "• `/cancel` → cancel current render\n\n"
+        "• `/cancel` → cancel current render\n"
+        "• `/tiktok` → re-render last in TikTok 9:16\n"
+        "• `/export` → export with hashtags\n"
+        "• `/draft` → quick preview of last animation\n"
+        "• `/versions` → last 3 animation versions\n"
+        "• `/gallery` → browse curated animations\n"
+        "• `/course <topic>` → generate learning course\n"
+        "• `/exam [STEP|EGE]` → exam prep mode\n"
+        "• `/debate <prompt>` → two AIs compete, best wins\n"
+        "• `/referral` → earn free renders by inviting friends\n"
+        "• `/teacher` → educator analytics dashboard\n\n"
         "Try: *Animate why matrix multiplication is function composition*"
     ))
 
@@ -882,6 +1089,257 @@ async def cmd_cancel(message: types.Message) -> None:
 # Handlers вЂ” WebApp Data (Settings)
 # ---------------------------------------------------------------------------
 
+
+@dp.message(Command("versions"))
+async def cmd_versions(message: types.Message) -> None:
+    """Show last 3 render versions with prompts."""
+    chat_id = message.chat.id
+    history = db.get_user_history(chat_id, limit=3)
+    if not history:
+        await _safe_reply(message, "No animation history yet. Render something first!")
+        return
+
+    lines = ["📑 **Your Last Versions:**\n"]
+    for i, rec in enumerate(history, 1):
+        prompt = rec.get("prompt", "unknown")[:60]
+        status = rec.get("status", "unknown")
+        theme = rec.get("theme", "default")
+        created = rec.get("created_at", "?")[:16]
+        emoji = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
+        lines.append(f"{i}. {emoji} `{prompt}...`")
+        lines.append(f"   _{theme}_ | {created}")
+
+    await _safe_reply(message, "\n".join(lines))
+
+
+
+@dp.message(Command("course"))
+async def cmd_course(message: types.Message) -> None:
+    """Generate a course series: /course <topic>."""
+    args = (message.text or "").replace("/course", "", 1).strip()
+    if not args:
+        await _safe_reply(message, "Usage: `/course <topic>`\n\nExample: `/course derivatives`")
+        return
+
+    await _safe_reply(message, f"📚 Designing a course on **{args}**...")
+    try:
+        course = await generate_course(args)
+        lines = [f"📚 **Course: {course.topic}**\n"]
+        for i, lesson in enumerate(course.lessons, 1):
+            level_emoji = "🟢" if lesson.level == "beginner" else "🟡" if lesson.level == "intermediate" else "🔴"
+            lines.append(f"{i}. {level_emoji} **{lesson.title}** ({lesson.level})")
+            lines.append(f"   _{', '.join(lesson.key_concepts[:3])}_")
+        lines.append(f"\nReply with a lesson number to generate that animation!")
+        await _safe_reply(message, "\n".join(lines))
+    except Exception as e:
+        logger.error(f"Course generation failed: {e}")
+        await _safe_reply(message, f"⚠️ Course generation failed: {e}")
+
+
+
+
+@dp.message(Command("exam"))
+async def cmd_exam(message: types.Message) -> None:
+    """Exam prep mode: /exam [STEP|EGE] [topic]."""
+    args = (message.text or "").replace("/exam", "", 1).strip()
+
+    if not args:
+        await _safe_reply(message, (
+            "📝 **Exam Prep Mode**\n\n"
+            "Usage:\n"
+            "• `/exam STEP` — random STEP question\n"
+            "• `/exam EGE` — random ЕГЭ question\n"
+            "• `/exam STEP derivatives` — STEP question about derivatives\n"
+            "• `/exam STEP2 2022 Q3` — specific question"
+        ))
+        return
+
+    parts = args.split()
+    exam_type = parts[0].upper()
+
+    if exam_type in ("STEP", "STEP2", "STEP3"):
+        bank_name = "STEP"
+    elif exam_type in ("EGE", "ЕГЭ"):
+        bank_name = "ЕГЭ"
+    else:
+        await _safe_reply(message, f"⚠️ Unknown exam: {exam_type}. Use STEP or EGE.")
+        return
+
+    # Check for specific topic
+    topic = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    if topic:
+        await _safe_reply(message, f"📝 Finding a {bank_name} question about: _{topic}_...")
+        question = await generate_animation_for_question(topic, bank_name)
+    else:
+        await _safe_reply(message, f"📝 Getting a random {bank_name} question...")
+        question = get_random_question(bank_name)
+
+    if not question:
+        await _safe_reply(message, f"⚠️ No {bank_name} questions available.")
+        return
+
+    difficulty_stars = "⭐" * (question.difficulty // 2)
+    await _safe_reply(message, (
+        f"📝 **{bank_name} {question.year}, Q{question.question_num}** {difficulty_stars}\n\n"
+        f"**Topic:** {question.topic}\n"
+        f"**Question:** {question.question_text[:200]}...\n\n"
+        f"🎬 Generating animation..."
+    ))
+    is_3d = any(w in question.animation_prompt.lower() for w in ("3d", "three-dimensional"))
+    await _send_animation(message, question.animation_prompt, is_3d=is_3d)
+
+
+
+@dp.message(Command("gallery"))
+async def cmd_gallery(message: types.Message) -> None:
+    """Browse gallery: /gallery [category|search|<id>]."""
+    args = (message.text or "").replace("/gallery", "", 1).strip()
+
+    if not args:
+        # Show featured + categories
+        featured = get_featured()
+        lines = ["🖼️ **Gallery — Featured**\n"]
+        for item in featured:
+            diff = "⭐" * (item.difficulty // 2)
+            lines.append(f"{item.id}. **{item.title}** {diff}")
+            lines.append(f"   _{item.category}_")
+        lines.append("\n📂 **Categories:** " + ", ".join(f"`{c}`" for c in ["Calculus", "Linear Algebra", "Probability", "Physics", "Geometry", "Complex Analysis"]))
+        lines.append("\nUse `/gallery calculus` to browse a category")
+        lines.append("Use `/gallery fourier` to search")
+        lines.append("Use `/gallery 3` to render item #3")
+        await _safe_reply(message, "\n".join(lines))
+        return
+
+    # Try parsing as item ID
+    if args.isdigit():
+        item_id = int(args)
+        item = get_by_id(item_id)
+        if not item:
+            await _safe_reply(message, f"⚠️ Item #{item_id} not found. Use `/gallery` to browse.")
+            return
+        increment_view(item.id)
+        diff = "⭐" * (item.difficulty // 2)
+        await _safe_reply(message, f"🎬 Rendering **{item.title}** {diff} ({item.category})...")
+        await _send_animation(message, item.prompt, is_3d=item.is_3d)
+        return
+
+    # Try as category
+    items = get_by_category(args)
+    if items:
+        lines = [f"📂 **{args}** ({len(items)} items)\n"]
+        for item in items:
+            diff = "⭐" * (item.difficulty // 2)
+            lines.append(f"{item.id}. **{item.title}** {diff}")
+        lines.append(f"\nUse `/gallery <number>` to render an item")
+        await _safe_reply(message, "\n".join(lines))
+        return
+
+    # Try as search
+    results = gallery_search(args)
+    if results:
+        lines = [f"🔍 **Search: {args}** ({len(results)} results)\n"]
+        for item in results:
+            diff = "⭐" * (item.difficulty // 2)
+            lines.append(f"{item.id}. **{item.title}** {diff}")
+            lines.append(f"   _{item.category}_")
+        lines.append(f"\nUse `/gallery <number>` to render an item")
+        await _safe_reply(message, "\n".join(lines))
+        return
+
+    await _safe_reply(message, f"No results for: {args}")
+
+
+
+@dp.message(Command("debate"))
+async def cmd_debate(message: types.Message) -> None:
+    """Multi-agent debate: two LLMs generate code, critic picks the best."""
+    prompt = (message.text or "").replace("/debate", "", 1).strip()
+    if not prompt:
+        await _safe_reply(message, "Usage: `/debate <description>`\n\nTwo AI agents compete to generate the best animation. Takes ~2× longer but produces higher quality.")
+        return
+
+    await _safe_reply(message, "⚔️ Starting debate: two AI agents generating independent solutions...")
+    chat_id = message.chat.id
+    user_quality = user_settings.get(chat_id, "quality") or MANIM_QUALITY
+    user_theme = user_settings.get(chat_id, "theme") or "visual_math"
+    theme = get_theme(user_theme)
+    theme_prompt = build_theme_prompt(theme)
+
+    # Run debate
+    code, scores = await debate_generate(prompt, theme_prompt)
+    if not code:
+        await _safe_reply(message, "⚠️ Both debate agents failed. Try a simpler prompt.")
+        return
+
+    # Show scores
+    score_text = f"⚔️ **Debate Results:**\n"
+    if "winner" in scores:
+        score_text += f"🏆 Agent {scores['winner']} won\n"
+    if "agent_a" in scores and isinstance(scores["agent_a"], float):
+        score_text += f"Agent A: {scores['agent_a']:.1f}/10 | Agent B: {scores['agent_b']:.1f}/10\n"
+    score_text += f"\n🎬 Rendering winner's code..."
+    await _safe_reply(message, score_text)
+
+    is_3d = any(w in prompt.lower() for w in ("3d", "three-dimensional"))
+    await _send_animation(message, prompt, is_3d=is_3d, quality=user_quality, theme_name=user_theme)
+
+
+
+@dp.message(Command("referral"))
+async def cmd_referral(message: types.Message) -> None:
+    """Show referral info and stats."""
+    chat_id = message.chat.id
+    info = get_user_referral_info(chat_id)
+
+    lines = [
+        "🎁 **Referral Program**\n",
+        f"**Your code:** `{info['code']}`",
+        f"**Bonus renders:** {info['bonus_renders']} free",
+        f"**Friends referred:** {info['referrals_made']}",
+        f"**Total renders:** {info['total_renders']}",
+        "",
+        "Share `/start " + info['code'] + "` with friends to earn +5 free renders each!",
+        "They get +5 free renders too! 🎉",
+    ]
+
+    await _safe_reply(message, "\n".join(lines))
+
+
+
+@dp.message(Command("teacher"))
+async def cmd_teacher(message: types.Message) -> None:
+    """Teacher dashboard — analytics for educators."""
+    chat_id = message.chat.id
+    dashboard = get_teacher_dashboard(chat_id)
+
+    if not dashboard:
+        # Register new teacher
+        register_teacher(chat_id)
+        await _safe_reply(message, (
+            "👩‍🏫 **Welcome to Teacher Dashboard!**\n\n"
+            "You've been registered as an educator.\n\n"
+            "**Commands:**\n"
+            "• `/teacher` — view your dashboard\n"
+            "• `/class add <student_id>` — add a student\n"
+            "• `/class stats` — engagement analytics"
+        ))
+        return
+
+    engagement = get_engagement_stats(chat_id)
+
+    lines = [
+        f"👩‍🏫 **{dashboard['name']}**\n",
+        f"**Students:** {engagement['students']}",
+        f"**Total views:** {engagement['total_views']}",
+        f"**Avg views/student:** {engagement['avg_views_per_student']:.1f}",
+        f"**Engagement rate:** {engagement['engagement_rate']:.0f}%",
+        f"**Registered:** {dashboard['registered_at']}",
+    ]
+
+    await _safe_reply(message, "\n".join(lines))
+
+
 @dp.message(F.web_app_data)
 async def handle_webapp_data(message: types.Message) -> None:
     """Handle settings sent from Telegram WebApp."""
@@ -944,7 +1402,7 @@ async def handle_webapp_data(message: types.Message) -> None:
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message) -> None:
-    """Photo handler в†’ Qwen vision (multimodal)."""
+    """Photo handler → vision analysis → animate if math/formula detected."""
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
         photo = message.photo[-1]
@@ -954,23 +1412,138 @@ async def handle_photo(message: types.Message) -> None:
         caption = message.caption or ""
 
         user_provider = user_settings.get(message.chat.id, "provider")
-        response = await chat_with_image(image_data, caption, provider=user_provider)
-        await _safe_reply(message, response)
+
+        # Step 1: Analyze image with vision model
+        analysis_prompt = (
+            "Analyze this image. Is it a mathematical formula, equation, diagram, or "
+            "scientific content? If yes, describe what concept it shows in 1-2 sentences "
+            "and suggest an animation prompt. If no, just describe the image normally. "
+            "Start your response with FORMULA: if it contains math, or CHAT: if not."
+        )
+        response = await chat_with_image(image_data, analysis_prompt, provider=user_provider)
+
+        # Step 2: Check if it's formula content
+        if response.startswith("FORMULA:") or "FORMULA:" in response:
+            # Extract the animation suggestion
+            formula_desc = response.replace("FORMULA:", "").strip()
+            await _safe_reply(message, f"📐 Math detected!\n\n{formula_desc}\n\n🎬 Generating animation...")
+            is_3d = any(w in formula_desc.lower() for w in ("3d", "three-dimensional"))
+            await _send_animation(message, f"Animate: {formula_desc}", is_3d=is_3d)
+        else:
+            # Regular image description
+            await _safe_reply(message, response)
     except TelegramBadRequest as e:
         logger.error(f"Photo handler Telegram error: {e}")
-        await _safe_reply(message, f"вљ пёЏ Couldn't process image: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't process image: {e}")
     except Exception as e:
         logger.error(f"Photo handler error: {e}")
-        await _safe_reply(message, "рџ–јпёЏ Vision temporarily unavailable. Please try again later.")
+        await _safe_reply(message, "🖼️ Vision temporarily unavailable. Please try again later.")
 
 
 # ---------------------------------------------------------------------------
-# Handlers вЂ” Text (Intent Router)
+# Handlers — Voice Message (STT → Animation)
+# ---------------------------------------------------------------------------
+
+@dp.message(F.voice)
+async def handle_voice(message: types.Message) -> None:
+    """Voice message handler — transcribe to text, then animate."""
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    try:
+        from stt import transcribe_voice
+
+        voice = message.voice
+        file = await bot.get_file(voice.file_id)
+        file_bytes = await bot.download_file(file.file_path)
+
+        # Save to temp file for transcription
+        temp_dir = Path("tmp") / "voice"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        ogg_path = temp_dir / f"voice_{message.chat.id}_{voice.file_unique_id}.ogg"
+        ogg_path.write_bytes(file_bytes.read())
+
+        await _safe_reply(message, "🎤 Transcribing voice message...")
+
+        text = await transcribe_voice(ogg_path)
+        ogg_path.unlink(missing_ok=True)
+
+        if text:
+            await _safe_reply(message, f"📝 Recognized: _\"{text}\"_\n\nGenerating animation...")
+            is_3d = any(w in text.lower() for w in ("3d", "three-dimensional"))
+            await _send_animation(message, text, is_3d=is_3d)
+        else:
+            await _safe_reply(message, "⚠️ Could not transcribe voice message. Please send text instead.")
+    except ImportError:
+        await _safe_reply(message, "⚠️ Speech-to-text not available. Please install: `pip install SpeechRecognition`")
+    except TelegramBadRequest as e:
+        logger.error(f"Voice handler Telegram error: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't process voice: {e}")
+    except Exception as e:
+        logger.error(f"Voice handler error: {e}")
+        await _safe_reply(message, "🎤 Voice processing temporarily unavailable. Please send text instead.")
+
+
+# ---------------------------------------------------------------------------
+# Handlers — Callback Query (Inline Buttons)
+# ---------------------------------------------------------------------------
+
+@dp.callback_query(F.data.startswith("feedback:"))
+async def handle_feedback_callback(callback: types.CallbackQuery) -> None:
+    """Handle 👍/👎 feedback button clicks."""
+    parts = callback.data.split(":")
+    # feedback:up:task_id or feedback:down:task_id
+    if len(parts) != 3:
+        return
+
+    direction = parts[1]
+    task_id = parts[2]
+    chat_id = callback.from_user.id
+
+    # Look up task to get prompt
+    task = render_queue.get_task(task_id)
+    prompt = task.prompt if task else "unknown"
+
+    if direction == "up":
+        log_feedback(chat_id, prompt, task_id, "thumbs_up")
+        await callback.answer("👍 Thanks for the feedback!", show_alert=False)
+    else:
+        log_feedback(chat_id, prompt, task_id, "thumbs_down")
+        await callback.answer("👎 Thanks — we'll use this to improve quality!", show_alert=False)
+
+
+@dp.callback_query(F.data.startswith("code:"))
+async def handle_code_callback(callback: types.CallbackQuery) -> None:
+    """Show the generated code for an animation."""
+    task_id = callback.data.split(":", 1)[1]
+    task = render_queue.get_task(task_id)
+    if not task:
+        await callback.answer("Task not found", show_alert=True)
+        return
+
+    # Try to get code from database first, then renderer
+    code = get_last_generated_code(callback.from_user.id)
+    if not code:
+        await callback.answer("Code not available", show_alert=True)
+        return
+
+    if len(code) > 3800:
+        code = code[:3800] + "\n\n# ... truncated"
+
+    await callback.answer("Code: " + code[:200] + "...", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("edit:"))
+async def handle_edit_callback(callback: types.CallbackQuery) -> None:
+    """Prompt user to send edit instructions."""
+    await callback.answer("Reply to this video with your changes (e.g. 'make it slower' or 'use blue theme')", show_alert=True)
+
+
+# ---------------------------------------------------------------------------
+# Handlers — Text (Intent Router)
 # ---------------------------------------------------------------------------
 
 @dp.message(F.text)
 async def handle_text(message: types.Message) -> None:
-    """Main text router: intent classification в†’ ANIMATE or CHAT."""
+    """Main text router: intent classification → ANIMATE or CHAT or EDIT."""
     text = message.text.strip()
     if not text:
         return
@@ -979,6 +1552,23 @@ async def handle_text(message: types.Message) -> None:
 
     chat_id = message.chat.id
     user_provider = user_settings.get(chat_id, "provider")
+
+    # Check if this is a reply to a previous animation (follow-up edit)
+    if message.reply_to_message and message.reply_to_message.video:
+        # User replied to an animation with edit instructions
+        last_render = db.get_last_render(chat_id)
+        if last_render and last_render.get("code"):
+            original_prompt = last_render.get("prompt", "")
+            last_code = last_render.get("code", "")
+            await _safe_reply(message, f"✏️ Editing animation: _\"{original_prompt[:60]}...\"_\n\nApplying: _\"{text[:80]}\"_")
+            # Treat as a new animation with combined prompt
+            combined_prompt = f"{original_prompt}. EDIT: {text}"
+            is_3d = any(w in combined_prompt.lower() for w in ("3d", "three-dimensional"))
+            await _send_animation(message, combined_prompt, is_3d=is_3d)
+            return
+        # No code available, treat as normal message
+        logger.warning("Reply to video but no code in DB — treating as normal chat")
+
     intent = await _classify_intent(text, chat_id)
 
     if intent == "ANIMATE":
@@ -1007,6 +1597,25 @@ async def handle_text(message: types.Message) -> None:
 
 # ---------------------------------------------------------------------------
 # Startup
+
+def _get_feedback_stats() -> dict:
+    """Get feedback statistics for /stats display."""
+    try:
+        from feedback import get_feedback_stats as _get_stats
+        return _get_stats()
+    except Exception:
+        return {"thumbs_up": 0, "thumbs_down": 0, "total": 0, "positive_rate": 0}
+
+
+def _get_error_pattern_stats() -> dict:
+    """Get error pattern statistics."""
+    try:
+        from error_learner import get_error_stats
+        return get_error_stats()
+    except Exception:
+        return {"total_errors": 0, "by_category": {}}
+
+
 # ---------------------------------------------------------------------------
 
 async def _analytics_flush_loop():

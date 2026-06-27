@@ -203,8 +203,9 @@ async def get_history(chat_id: int, limit: int = 10) -> list[dict]:
                 "SELECT prompt, created_at FROM render_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?",
                 [chat_id, limit],
             )
-            if result and len(result) > 0:
-                return result[0].get("results", [])
+            # _cf_query already returns flat list of row dicts
+            if result:
+                return [{"prompt": r.get("prompt", ""), "created_at": r.get("created_at", "")} for r in result]
         elif _local_db:
             cur = _local_db.execute(
                 "SELECT prompt, created_at FROM render_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?",
@@ -226,10 +227,9 @@ async def get_last_code(chat_id: int) -> str | None:
                 "SELECT generated_code FROM render_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",
                 [chat_id],
             )
-            if result and len(result) > 0:
-                rows = result[0].get("results", [])
-                if rows and rows[0].get("generated_code"):
-                    return rows[0]["generated_code"]
+            # _cf_query already returns flat list of row dicts
+            if result and result[0].get("generated_code"):
+                return result[0]["generated_code"]
         elif _local_db:
             cur = _local_db.execute(
                 "SELECT generated_code FROM render_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",

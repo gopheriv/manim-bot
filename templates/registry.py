@@ -98,6 +98,14 @@ def get_registry() -> TemplateRegistry:
         _registry.register(tmpl_cls())
 
     logger.info("Template registry initialized with %d templates", _registry.template_count)
+
+    # Load JSON-based templates (50+ additional templates)
+    from templates.json_templates import load_json_templates
+    json_templates = load_json_templates()
+    for tmpl in json_templates:
+        _registry.register(tmpl)
+
+    logger.info("Template registry now has %d templates (class + JSON)", _registry.template_count)
     return _registry
 
 
