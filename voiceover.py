@@ -156,7 +156,8 @@ async def merge(video_path: Path, audio_path: Path, output_path: Path) -> Path |
         return output_path
 
     except asyncio.TimeoutError:
-        logger.error("ffmpeg merge timed out")
+        logger.error("ffmpeg merge timed out — killing process")
+        proc.kill()
         return None
     except Exception:
         logger.error("ffmpeg merge failed", exc_info=True)
@@ -197,7 +198,8 @@ async def strip_audio(video_path: Path, output_dir: Path) -> Path | None:
         return silent_path
 
     except asyncio.TimeoutError:
-        logger.error("ffmpeg strip timed out")
+        logger.error("ffmpeg strip timed out — killing process")
+        proc.kill()
         return None
     except Exception:
         logger.error("ffmpeg strip failed", exc_info=True)
@@ -238,7 +240,8 @@ async def video_to_gif(video_path: Path, output_dir: Path) -> Path | None:
         return gif_path
 
     except asyncio.TimeoutError:
-        logger.error("ffmpeg GIF conversion timed out")
+        logger.error("ffmpeg GIF conversion timed out — killing process")
+        proc.kill()
         return None
     except Exception:
         logger.error("ffmpeg GIF conversion failed", exc_info=True)

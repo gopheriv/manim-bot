@@ -208,10 +208,6 @@ async def render(
         )
 
         # Stream stderr line-by-line for real-time progress parsing
-        cancel_wait: asyncio.Task | None = None
-        if cancel_event is not None:
-            cancel_wait = asyncio.create_task(cancel_event.wait())
-
         stdout_buf = bytearray()
         stderr_buf = bytearray()
         last_pct = 0
@@ -235,7 +231,7 @@ async def render(
                     f"({mem.available / 1024**3:.1f} GB free). Simplify the scene."
                 )
                 # Let memory settle before the next render attempt
-                time.sleep(5)
+                await asyncio.sleep(5)
                 gc.collect()
                 gc.collect()  # second pass to catch resurrected refs
                 mem_after = psutil.virtual_memory()
@@ -316,7 +312,7 @@ async def render(
         if proc and proc.pid:
             _kill_process_tree(proc.pid)
         render._last_error = "Render task was cancelled."
-        return None
+        raise  # Re-raise so caller knows task was cancelled
     except Exception as e:
         logger.error(f"Render exception: {e}", exc_info=True)
         render._last_error = str(e)

@@ -60,10 +60,13 @@ async def debate_generate(prompt: str, theme_instructions: str) -> tuple[str, di
         (winning_code, scores_dict)
     """
     # Generate two independent solutions
-    code_a, code_b = await asyncio.gather(
+    results = await asyncio.gather(
         generate_debate_entry(prompt, theme_instructions, 0),
         generate_debate_entry(prompt, theme_instructions, 1),
+        return_exceptions=True,
     )
+    code_a = results[0] if not isinstance(results[0], Exception) else ""
+    code_b = results[1] if not isinstance(results[1], Exception) else ""
 
     if not code_a and not code_b:
         logger.warning("Both debate agents failed, returning empty")

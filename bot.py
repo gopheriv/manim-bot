@@ -107,6 +107,15 @@ async def _safe_answer(message: types.Message, text: str, **kwargs) -> None:
             await message.answer(plain[:4000])
 
 
+async def _cancel_task(task: asyncio.Task) -> None:
+    """Cancel an asyncio task and properly await its completion."""
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def _safe_edit(message: types.Message, text: str, **kwargs) -> None:
     """Edit a message with Markdown safety вЂ” falls back to plain text on parse errors."""
     try:
@@ -181,7 +190,8 @@ async def _progress_loop(chat_id: int, render_task, narration_task: asyncio.Task
             # Update progress bar text every 30s
             if status_message and idx % 2 == 0:
                 elapsed = int(asyncio.get_running_loop().time() - start_time)
-                progress_bar = _render_progress_bar(elapsed)
+                mins, secs = divmod(elapsed, 60)
+                progress_bar = f"⏳ {mins}m {secs}s elapsed"
                 try:
                     await status_message.edit_text(progress_bar, parse_mode=ParseMode.MARKDOWN)
                 except Exception:
@@ -557,15 +567,18 @@ async def _send_animation(
                 await _safe_edit(status_msg, "вљ пёЏ Heavy scene detected вЂ” auto-optimizing for your hardwareвЂ¦")
                 await asyncio.sleep(0.5)  # Let user see the warning
             _render_progress = {"pct": 0, "anim": ""}
+            _background_tasks: set[asyncio.Task] = set()
 
             def _on_manim_progress(pct: int, anim_name: str) -> None:
-                """Callback from renderer вЂ” updates Telegram status message."""
+                """Callback from renderer — updates Telegram status message."""
                 _render_progress["pct"] = pct
-                _render_progress["anim"] = anim_name
+                _render_progress["anim"] = anim_name or "unknown"
                 bar = _build_progress_bar(pct)
-                asyncio.create_task(
-                    _safe_edit(status_msg, f"рџЋ¬ *RenderingвЂ¦*\n{bar} {pct}%\nрџЋћпёЏ `{anim_name[:40]}`")
+                task = asyncio.create_task(
+                    _safe_edit(status_msg, f"🎬 *Rendering…*\n{bar} {pct}%\n🎞️ `{(anim_name or 'unknown')[:40]}`")
                 )
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
 
             render_coro = render(
                 code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
@@ -574,22 +587,33 @@ async def _send_animation(
             )
 
             if user_voiceover and VOICEOVER_ENABLED:
-                # Launch both in parallel вЂ” saves ~15-30s
+                # Launch both in parallel — saves ~15-30s
                 render_task = asyncio.create_task(render_coro)
                 narration_task = asyncio.create_task(_generate_narration(prompt))
 
-                # Periodic progress updates while waiting вЂ” edit bot's own message
+                # Periodic progress updates while waiting — edit bot's own message
                 progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, narration_task, status_msg))
 
-                video_path = await render_task
+                try:
+                    video_path = await render_task
+                except asyncio.CancelledError:
+                    _cancel_task(progress_task)
+                    _cancel_task(narration_task)
+                    task.status = TaskStatus.CANCELLED
+                    raise
                 narration = await narration_task
-                progress_task.cancel()
+                _cancel_task(progress_task)
             else:
-                # No voiceover вЂ” still show progress
+                # No voiceover — still show progress
                 render_task = asyncio.create_task(render_coro)
                 progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None, status_msg))
-                video_path = await render_task
-                progress_task.cancel()
+                try:
+                    video_path = await render_task
+                except asyncio.CancelledError:
+                    _cancel_task(progress_task)
+                    task.status = TaskStatus.CANCELLED
+                    raise
+                _cancel_task(progress_task)
                 narration = None
 
             # Check if user cancelled
@@ -757,11 +781,14 @@ async def _send_animation(
                 completed_at=task.completed_at,
             )
 
-            # Save to D1 cache
+            # Save to D1 cache (fire-and-forget with tracking)
             if telegram_file_id:
-                asyncio.create_task(
+                _d1_tasks: set[asyncio.Task] = set()
+                d1_task = asyncio.create_task(
                     d1.save_render(chat_id, prompt, code, telegram_file_id)
                 )
+                _d1_tasks.add(d1_task)
+                d1_task.add_done_callback(_d1_tasks.discard)
 
             logger.info(f"Animation done вЂ” chat_id={chat_id}, prompt={prompt[:50]}вЂ¦")
 
@@ -1747,10 +1774,17 @@ async def main() -> None:
     logger.info(f"TTS:     {'enabled' if VOICEOVER_ENABLED else 'disabled'} ({TTS_VOICE})")
     logger.info("Polling started вЂ” waiting for messages")
 
-    # Start analytics flusher as background task
-    asyncio.create_task(_analytics_flush_loop())
+    # Start analytics flusher as background task (tracked for shutdown)
+    _analytics_task = asyncio.create_task(_analytics_flush_loop())
 
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        _analytics_task.cancel()
+        try:
+            await _analytics_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":

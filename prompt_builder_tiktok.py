@@ -205,13 +205,13 @@ self.wait(2.0)
 
 def get_tiktok_prompt(user_request: str) -> str:
     """Generate TikTok-optimized prompt from user request."""
-    from prompt_builder import BASE_MANIM_RULES, SCENE_AWARENESS_CONTRACT
+    from prompt_builder import BASE_MANIM_RULES, SCENE_AWARENESS
 
     return f"""{BASE_MANIM_RULES}
 
 {TIKTOK_FORMAT_RULES}
 
-{SCENE_AWARENESS_CONTRACT}
+{SCENE_AWARENESS}
 
 ## User Request
 {user_request}
