@@ -81,9 +81,17 @@ def test_resolve_provider_auto_prefers_claude(monkeypatch):
     assert _resolve_provider() == "claude"
 
 
+def test_resolve_provider_auto_prefers_qwen_over_openai(monkeypatch):
+    monkeypatch.setattr(judge_ai, "JUDGE_PROVIDER", "auto")
+    monkeypatch.setattr(judge_ai, "CLAUDE_API_KEY", "")
+    monkeypatch.setattr(judge_ai, "QWEN_API_KEY", "dk-test")
+    assert _resolve_provider() == "qwen"
+
+
 def test_resolve_provider_auto_falls_back_to_openai(monkeypatch):
     monkeypatch.setattr(judge_ai, "JUDGE_PROVIDER", "auto")
     monkeypatch.setattr(judge_ai, "CLAUDE_API_KEY", "")
+    monkeypatch.setattr(judge_ai, "QWEN_API_KEY", "")
     monkeypatch.setattr(judge_ai, "JUDGE_BASE_URL", "https://x")
     monkeypatch.setattr(judge_ai, "JUDGE_API_KEY", "k")
     assert _resolve_provider() == "openai"
@@ -92,6 +100,7 @@ def test_resolve_provider_auto_falls_back_to_openai(monkeypatch):
 def test_resolve_provider_none_when_unconfigured(monkeypatch):
     monkeypatch.setattr(judge_ai, "JUDGE_PROVIDER", "auto")
     monkeypatch.setattr(judge_ai, "CLAUDE_API_KEY", "")
+    monkeypatch.setattr(judge_ai, "QWEN_API_KEY", "")
     monkeypatch.setattr(judge_ai, "JUDGE_BASE_URL", "")
     monkeypatch.setattr(judge_ai, "JUDGE_API_KEY", "")
     assert _resolve_provider() is None

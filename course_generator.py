@@ -98,5 +98,8 @@ async def generate_course(topic: str) -> Course:
         return Course(topic=topic_name, lessons=lessons)
 
     except Exception as e:
+        # Use the `topic` parameter (always defined) — `topic_name` is only
+        # bound after a successful LLM call + parse, so referencing it here
+        # would raise UnboundLocalError and mask the real failure.
         logger.error(f"Course generation failed: {e}")
-        return Course(topic=topic_name, lessons=[])
+        return Course(topic=topic, lessons=[])

@@ -85,6 +85,7 @@ async def init() -> bool:
 
 async def health_check() -> dict:
     """Quick D1 health check. Returns status dict for diagnostics."""
+    global _cf_available, _local_db
     result = {
         "d1_enabled": D1_ENABLED,
         "cf_available": _cf_available,
@@ -146,22 +147,19 @@ async def check_cache(chat_id: int, prompt: str) -> str | None:
             if rows and rows[0].get("telegram_file_id"):
                 logger.info(f"Cache HIT for chat_id={chat_id}")
                 return rows[0]["telegram_file_id"]
-        else:
-            # Local SQLite fallback
-            await asyncio.to_thread(
-                _local_query,
-                "SELECT telegram_file_id FROM render_history WHERE chat_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
-                (chat_id, prompt),
-            )
-            if _local_db:
+        elif _local_db:
+            # Local SQLite fallback (single query — run off the event loop)
+            def _lookup():
                 cur = _local_db.execute(
                     "SELECT telegram_file_id FROM render_history WHERE chat_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
                     (chat_id, prompt),
                 )
-                row = cur.fetchone()
-                if row and row[0]:
-                    logger.info(f"Local cache HIT for chat_id={chat_id}")
-                    return row[0]
+                return cur.fetchone()
+
+            row = await asyncio.to_thread(_lookup)
+            if row and row[0]:
+                logger.info(f"Local cache HIT for chat_id={chat_id}")
+                return row[0]
     except Exception as e:
         logger.warning(f"Cache check error: {e}")
     return None

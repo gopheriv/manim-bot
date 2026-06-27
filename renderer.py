@@ -229,8 +229,21 @@ async def render(
         stderr_buf = bytearray()
         last_pct = 0
         last_anim = ""
+        loop_start = time.monotonic()
 
         while True:
+            # Wall-clock timeout — kill a hung/stuck render that produces no more
+            # output and never exits (e.g. an infinite loop in generated code).
+            # Without this the loop would spin forever, holding the render
+            # semaphore and the user's task open indefinitely.
+            if time.monotonic() - loop_start > timeout:
+                logger.error(f"Render exceeded {timeout}s — killing process tree (pid {proc.pid})")
+                _kill_process_tree(proc.pid)
+                render._last_error = (
+                    f"Render timed out after {timeout}s. The scene is too heavy."
+                )
+                return None
+
             # Check cancellation
             if cancel_event and cancel_event.is_set():
                 logger.info(f"Render cancelled — killing process tree (pid {proc.pid})")

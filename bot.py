@@ -1,4 +1,4 @@
-"""Manim Animation Bot — Telegram bot with Qwen 3.7 Max code gen, Qwen 3.6 chat,
+"""Manim Animation Bot — Telegram bot with GPT-5.5 code gen, Qwen 3.6 chat,
 edge-tts voiceover, themes, queue management, rate limiting, and D1 caching."""
 
 import asyncio
@@ -252,17 +252,27 @@ async def _send_animation(
     skip_cache: bool = False,
     edit_base_code: str = "",
     edit_instruction: str = "",
+    pregenerated_code: str = "",
 ) -> None:
     """Full animation pipeline with queue, themes, self-healing, and caching.
 
     When ``edit_base_code`` is provided, the generation step starts from that
     code and applies ``edit_instruction`` (edit-by-diff) instead of generating a
     brand-new animation from scratch.
+
+    When ``pregenerated_code`` is provided (e.g. the winner of ``/debate``), the
+    generation step is skipped entirely and that code goes straight into the
+    validate → judge → render pipeline — so the work that produced it is not
+    thrown away.
     """
     chat_id = message.chat.id
     original_prompt = prompt  # captured before any enhancement; used for the cache key
     # Edits always bypass the cache so the user gets the modified version.
     if edit_base_code:
+        skip_cache = True
+    # A pre-generated candidate (e.g. /debate winner) must be the thing rendered,
+    # not a cached look-alike for the same prompt.
+    if pregenerated_code:
         skip_cache = True
 
     # TikTok mode detection (auto-detect if not explicitly set)
@@ -330,8 +340,18 @@ async def _send_animation(
             theme_prompt: str = ""  # Always defined — empty for templates, built for LLM path
             scene_plan_json: str = ""  # Always defined — empty for templates, built for LLM path
 
+            # ── PRE-GENERATED: render a candidate produced upstream (e.g. the
+            # /debate winner) instead of generating a fresh, unrelated one ──
+            if pregenerated_code:
+                theme_prompt = (
+                    get_tiktok_prompt(prompt, theme_instructions=build_theme_prompt(theme))
+                    if tiktok_mode else build_theme_prompt(theme)
+                )
+                code = strip_code_fences(pregenerated_code)
+                logger.info("Using pre-generated code (%d chars), skipping generation", len(code))
+
             # ── EDIT-BY-DIFF: start from the prior code and apply the change ──
-            if edit_base_code:
+            elif edit_base_code:
                 theme_prompt = (
                     get_tiktok_prompt(prompt, theme_instructions=build_theme_prompt(theme))
                     if tiktok_mode else build_theme_prompt(theme)
@@ -709,7 +729,7 @@ async def _send_animation(
                 if "cancelled" not in error_msg.lower():
                     for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
                         logger.info("Render failed — self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
-                        await _safe_reply(message, f"🔧 Render failed, asking Qwen 3.7 Max to fix the code (attempt {heal_attempt})…")
+                        await _safe_reply(message, f"🔧 Render failed, asking {GPT_MODEL} to fix the code (attempt {heal_attempt})…")
 
                         try:
                             fixed_code = await fix_manim_code(prompt, error_msg, theme_prompt, original_code=code)
@@ -1559,7 +1579,10 @@ async def cmd_debate(message: types.Message) -> None:
     await _safe_reply(message, score_text)
 
     is_3d = any(w in prompt.lower() for w in ("3d", "three-dimensional"))
-    await _send_animation(message, prompt, is_3d=is_3d, quality=user_quality, theme_name=user_theme)
+    await _send_animation(
+        message, prompt, is_3d=is_3d, quality=user_quality, theme_name=user_theme,
+        pregenerated_code=code,
+    )
 
 
 
@@ -1924,7 +1947,7 @@ async def _analytics_flush_loop():
 async def main() -> None:
     await d1.init()
     logger.info("Starting Manim Animation Bot + AI Assistant…")
-    logger.info(f"Qwen 3.7 Max: {GPT_MODEL} (reasoning: {GPT_REASONING_EFFORT})")
+    logger.info(f"Code gen: {GPT_MODEL} (reasoning: {GPT_REASONING_EFFORT})")
     logger.info(f"Chat:    {CHAT_MODEL}")
     logger.info(f"Cloud:   D1 {'enabled' if D1_ENABLED else 'disabled (graceful fallback)'}")
     logger.info(f"TTS:     {'enabled' if VOICEOVER_ENABLED else 'disabled'} ({TTS_VOICE})")
