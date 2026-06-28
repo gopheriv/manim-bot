@@ -301,8 +301,10 @@ async def _send_animation(
     # at >85% RAM, so if we're already there, generating code + judging it would
     # just be thrown away when the render is blocked. Fail honestly now and spend
     # no LLM calls. (Threshold mirrors renderer.render's >85% block.)
+    # If cloud render is available, skip this gate — code gen uses LLM API calls
+    # (minimal local RAM) and the actual render happens on the 16 GB cloud worker.
     mem = psutil.virtual_memory()
-    if mem.percent > 85:
+    if mem.percent > 85 and not cloud_available():
         free_gb = mem.available / 1024 ** 3
         await _safe_reply(message, (
             f"⚠️ The server is low on memory right now (only {free_gb:.1f} GB free). "
@@ -740,14 +742,77 @@ async def _send_animation(
                 await _safe_reply(message, "❌ Render cancelled.")
                 return
 
-            # Resource failures (RAM / timeout) cannot be fixed by rewriting code:
-            # an OOM/timeout would re-render into the same wall, and even the
-            # lightweight fallback render would be blocked at >85% RAM. Fail fast
-            # with an honest message and spend NO LLM repair calls.
+            # Resource failures (RAM / timeout) cannot be fixed by rewriting code
+            # locally — but the cloud worker (16 GB / 4 vCPU) can handle heavy scenes.
+            # If cloud render is available, dispatch there instead of failing.
             if (video_path is None and render._last_error
                     and classify_render_error(render._last_error) == "resource"):
                 err = render._last_error
                 low = err.lower()
+
+                # Cloud fallback for resource-blocked scenes
+                if cloud_available():
+                    await _safe_edit(status_msg, "☁️ Scene too heavy for local hardware — dispatching to cloud worker (1080p/60fps)…")
+                    logger.info("Resource error locally — dispatching to cloud render farm")
+                    try:
+                        cloud_path = await cloud_render.cloud_render(
+                            code,
+                            quality=get_cloud_quality(),
+                            fps=get_cloud_fps(),
+                            dest_dir=Path("tmp/cloud") / str(chat_id),
+                        )
+                        if cloud_path and cloud_path.exists():
+                            video_path = cloud_path
+                            logger.info("Cloud render succeeded for resource-blocked scene: %s", cloud_path)
+                            # Skip self-heal/visual-critic for cloud-rendered — go straight to send
+                            # (cloud already produced 1080p/60fps, no need for watermark/voiceover on a fallback)
+                            await bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
+                            video_file = FSInputFile(str(video_path))
+                            feedback_kb = InlineKeyboardMarkup(inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(text="👍 Great", callback_data=f"feedback:up:{task.task_id}"),
+                                    InlineKeyboardButton(text="👎 Needs work", callback_data=f"feedback:down:{task.task_id}"),
+                                ],
+                                [
+                                    InlineKeyboardButton(text="📋 Code", callback_data=f"code:{task.task_id}"),
+                                ],
+                            ])
+                            sent = await message.reply_video(
+                                video=video_file,
+                                caption=f"☁️ Rendered in the cloud (1080p/60fps) — scene was too heavy for local hardware",
+                                reply_markup=feedback_kb,
+                            )
+                            task.status = TaskStatus.COMPLETED
+                            task.completed_at = datetime.now()
+                            task.result_path = str(video_path)
+                            telegram_file_id = sent.video.file_id if sent.video else None
+                            db.save_render(
+                                chat_id=chat_id, task_id=task.task_id, prompt=prompt,
+                                is_3d=is_3d, quality="-qh", theme=user_theme, status="completed",
+                                code=code, video_path=str(video_path), video_file_id=telegram_file_id,
+                                started_at=task.started_at, completed_at=task.completed_at,
+                            )
+                            analytics.log_render_success(chat_id, (datetime.now() - render_start).total_seconds())
+                            logger.info(f"Cloud render sent — chat_id={chat_id}, prompt={prompt[:50]}…")
+                            return
+                        else:
+                            cloud_err = cloud_render.cloud_render_last_error
+                            logger.warning("Cloud render also failed: %s", cloud_err)
+                            msg = (
+                                f"⚠️ That scene was too heavy for local hardware AND the cloud worker failed too:\n"
+                                f"```\n{cloud_err[:300]}\n```\nTry a simpler prompt or fewer moving parts."
+                            )
+                    except Exception as cloud_exc:
+                        logger.warning("Cloud render exception: %s", cloud_exc)
+                        msg = f"⚠️ Cloud render failed: {str(cloud_exc)[:200]}. Try a simpler prompt."
+                    task.status = TaskStatus.FAILED
+                    task.error_message = (err or "")[:500]
+                    task.completed_at = datetime.now()
+                    analytics.log_render_failure(chat_id, "cloud_and_local_failed")
+                    await _safe_reply(message, msg)
+                    return
+
+                # No cloud available — original behavior: fail fast
                 if "timed out" in low or "too heavy" in low:
                     msg = (
                         f"⚠️ That scene was too heavy and timed out at {MANIM_TIMEOUT}s. "
