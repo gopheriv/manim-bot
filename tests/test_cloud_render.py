@@ -116,8 +116,8 @@ def test_download_into_reused_dest_no_collision(monkeypatch):
         monkeypatch.setattr(cr, "_gh", fake)
         out = run(cr.await_render("jReuse", d))
         assert out is not None and out.exists()
-        assert out.parent != d  # isolated in its own per-job subdir
-        assert out.parent.name == "render-jReuse"
+        assert out.parent != d  # isolated in its own fresh per-job subdir
+        assert out.parent.name.startswith("render-jReuse")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -136,7 +136,7 @@ def test_download_purges_stale_leftovers(monkeypatch):
         monkeypatch.setattr(cr, "_gh", fake)
         out = run(cr.await_render("jNew", d))
         assert out is not None and out.exists()
-        assert out.parent.name == "render-jNew"
+        assert out.parent.name.startswith("render-jNew")
         assert not (d / "render.mp4").exists(), "legacy root render.mp4 not purged"
         assert not old.exists(), "stale prior job dir not purged"
     finally:
