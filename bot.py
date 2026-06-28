@@ -713,26 +713,46 @@ async def _send_animation(
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
 
-            render_coro = render(
-                code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
-                tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
-                progress_cb=_on_manim_progress,
-            )
-
             render_start = datetime.now()
-            # Render first. Narration is generated AFTER the render, from the
-            # final code, so the script can reference the actual visual beats
-            # (and so a self-heal/fallback that changes the code is reflected).
-            # Latency is not a concern here; correctness of sync is.
-            render_task = asyncio.create_task(render_coro)
-            progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None, status_msg))
-            try:
-                video_path = await render_task
-            except asyncio.CancelledError:
+
+            # Cloud-only mode: dispatch directly to cloud worker (16GB/4vCPU) instead
+            # of rendering locally. Skips local render entirely when cloud is available.
+            if cloud_available():
+                await _safe_edit(status_msg, "☁️ Dispatching to cloud worker (1080p/60fps)…")
+                logger.info("Cloud-only mode: dispatching render to cloud worker")
+                try:
+                    video_path = await cloud_render.cloud_render(
+                        code,
+                        quality=get_cloud_quality(),
+                        fps=get_cloud_fps(),
+                        dest_dir=Path("tmp/cloud") / str(chat_id),
+                    )
+                    if video_path and video_path.exists():
+                        logger.info("Cloud render succeeded: %s", video_path)
+                    else:
+                        cloud_err = cloud_render.cloud_render_last_error
+                        logger.warning("Cloud render failed: %s", cloud_err)
+                        video_path = None
+                except Exception as cloud_exc:
+                    logger.warning("Cloud render exception: %s", cloud_exc)
+                    video_path = None
+            else:
+                # Local render (fallback when cloud is not available)
+                render_coro = render(
+                    code, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
+                    tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                    progress_cb=_on_manim_progress,
+                )
+                render_task = asyncio.create_task(render_coro)
+                progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None, status_msg))
+                try:
+                    video_path = await render_task
+                except asyncio.CancelledError:
+                    await _cancel_task(progress_task)
+                    task.status = TaskStatus.CANCELLED
+                    raise
                 await _cancel_task(progress_task)
-                task.status = TaskStatus.CANCELLED
-                raise
-            await _cancel_task(progress_task)
+
             narration = None  # generated later, from the final code
 
             # Check if user cancelled
@@ -742,77 +762,65 @@ async def _send_animation(
                 await _safe_reply(message, "❌ Render cancelled.")
                 return
 
-            # Resource failures (RAM / timeout) cannot be fixed by rewriting code
-            # locally — but the cloud worker (16 GB / 4 vCPU) can handle heavy scenes.
-            # If cloud render is available, dispatch there instead of failing.
-            if (video_path is None and render._last_error
+            # ── Post-render error handling ──────────────────────────────────
+            # Track the last render error for self-heal (works for both local and cloud)
+            last_render_error = ""
+            if video_path is None:
+                if cloud_available():
+                    last_render_error = cloud_render.cloud_render_last_error or "Cloud render failed"
+                else:
+                    last_render_error = render._last_error or "Local render failed"
+
+            # Cloud render code errors → self-heal (same as local code errors)
+            if (video_path is None and last_render_error
+                    and cloud_available()
+                    and MANIM_MAX_RETRIES > 0
+                    and "cancelled" not in last_render_error.lower()):
+                error_msg = last_render_error
+                for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
+                    logger.info("Cloud render failed — self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
+                    await _safe_edit(status_msg, f"🔧 Cloud render failed, asking {GPT_MODEL} to fix the code (attempt {heal_attempt})…")
+                    try:
+                        fixed_code = await fix_manim_code(prompt, error_msg, theme_prompt, original_code=code)
+                        if fixed_code and fixed_code.strip():
+                            fixed_code = strip_code_fences(fixed_code)
+                            video_path = await cloud_render.cloud_render(
+                                fixed_code, quality=get_cloud_quality(), fps=get_cloud_fps(),
+                                dest_dir=Path("tmp/cloud") / str(chat_id),
+                            )
+                            if video_path and video_path.exists():
+                                code = fixed_code
+                                logger.info("Cloud self-heal succeeded on attempt %d", heal_attempt)
+                                break
+                            # Second attempt: simplify
+                            if heal_attempt == 1:
+                                error_msg = cloud_render.cloud_render_last_error or error_msg
+                                await _safe_edit(status_msg, "🔧 Still failing — trying a simpler version in cloud…")
+                                fixed_code = await fix_manim_code(
+                                    prompt,
+                                    f"Previous repair also failed. SIMPLIFY the scene: reduce object count, remove heavy updaters, fewer self.play() calls, shorter duration. Error: {error_msg}",
+                                    theme_prompt, original_code=fixed_code,
+                                )
+                                if fixed_code and fixed_code.strip():
+                                    fixed_code = strip_code_fences(fixed_code)
+                                    video_path = await cloud_render.cloud_render(
+                                        fixed_code, quality=get_cloud_quality(), fps=get_cloud_fps(),
+                                        dest_dir=Path("tmp/cloud") / str(chat_id),
+                                    )
+                                    if video_path and video_path.exists():
+                                        code = fixed_code
+                                        break
+                    except Exception as e:
+                        logger.error(f"Cloud self-heal attempt {heal_attempt} failed: {e}")
+                if video_path is None:
+                    log_error(prompt, last_render_error, code)
+
+            # Resource failures on LOCAL render (only when cloud is NOT available):
+            if (video_path is None and not cloud_available()
+                    and render._last_error
                     and classify_render_error(render._last_error) == "resource"):
                 err = render._last_error
                 low = err.lower()
-
-                # Cloud fallback for resource-blocked scenes
-                if cloud_available():
-                    await _safe_edit(status_msg, "☁️ Scene too heavy for local hardware — dispatching to cloud worker (1080p/60fps)…")
-                    logger.info("Resource error locally — dispatching to cloud render farm")
-                    try:
-                        cloud_path = await cloud_render.cloud_render(
-                            code,
-                            quality=get_cloud_quality(),
-                            fps=get_cloud_fps(),
-                            dest_dir=Path("tmp/cloud") / str(chat_id),
-                        )
-                        if cloud_path and cloud_path.exists():
-                            video_path = cloud_path
-                            logger.info("Cloud render succeeded for resource-blocked scene: %s", cloud_path)
-                            # Skip self-heal/visual-critic for cloud-rendered — go straight to send
-                            # (cloud already produced 1080p/60fps, no need for watermark/voiceover on a fallback)
-                            await bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
-                            video_file = FSInputFile(str(video_path))
-                            feedback_kb = InlineKeyboardMarkup(inline_keyboard=[
-                                [
-                                    InlineKeyboardButton(text="👍 Great", callback_data=f"feedback:up:{task.task_id}"),
-                                    InlineKeyboardButton(text="👎 Needs work", callback_data=f"feedback:down:{task.task_id}"),
-                                ],
-                                [
-                                    InlineKeyboardButton(text="📋 Code", callback_data=f"code:{task.task_id}"),
-                                ],
-                            ])
-                            sent = await message.reply_video(
-                                video=video_file,
-                                caption=f"☁️ Rendered in the cloud (1080p/60fps) — scene was too heavy for local hardware",
-                                reply_markup=feedback_kb,
-                            )
-                            task.status = TaskStatus.COMPLETED
-                            task.completed_at = datetime.now()
-                            task.result_path = str(video_path)
-                            telegram_file_id = sent.video.file_id if sent.video else None
-                            db.save_render(
-                                chat_id=chat_id, task_id=task.task_id, prompt=prompt,
-                                is_3d=is_3d, quality="-qh", theme=user_theme, status="completed",
-                                code=code, video_path=str(video_path), video_file_id=telegram_file_id,
-                                started_at=task.started_at, completed_at=task.completed_at,
-                            )
-                            analytics.log_render_success(chat_id, (datetime.now() - render_start).total_seconds())
-                            logger.info(f"Cloud render sent — chat_id={chat_id}, prompt={prompt[:50]}…")
-                            return
-                        else:
-                            cloud_err = cloud_render.cloud_render_last_error
-                            logger.warning("Cloud render also failed: %s", cloud_err)
-                            msg = (
-                                f"⚠️ That scene was too heavy for local hardware AND the cloud worker failed too:\n"
-                                f"```\n{cloud_err[:300]}\n```\nTry a simpler prompt or fewer moving parts."
-                            )
-                    except Exception as cloud_exc:
-                        logger.warning("Cloud render exception: %s", cloud_exc)
-                        msg = f"⚠️ Cloud render failed: {str(cloud_exc)[:200]}. Try a simpler prompt."
-                    task.status = TaskStatus.FAILED
-                    task.error_message = (err or "")[:500]
-                    task.completed_at = datetime.now()
-                    analytics.log_render_failure(chat_id, "cloud_and_local_failed")
-                    await _safe_reply(message, msg)
-                    return
-
-                # No cloud available — original behavior: fail fast
                 if "timed out" in low or "too heavy" in low:
                     msg = (
                         f"⚠️ That scene was too heavy and timed out at {MANIM_TIMEOUT}s. "
@@ -826,7 +834,7 @@ async def _send_animation(
                         f"({free_gb:.1f} GB free). Please close other apps or try again shortly."
                     )
                     reason = "resource_blocked"
-                logger.warning("Render hit a resource limit (%s) — failing fast, skipping code repair + fallback", reason)
+                logger.warning("Render hit a resource limit (%s) — failing fast", reason)
                 task.status = TaskStatus.FAILED
                 task.error_message = err[:500]
                 task.completed_at = datetime.now()
@@ -834,9 +842,9 @@ async def _send_animation(
                 await _safe_reply(message, msg)
                 return
 
-            # Self-healing (CODE errors only — resource errors returned above):
-            # up to MANIM_MAX_RETRIES attempts with escalating simplification.
-            if video_path is None and render._last_error and MANIM_MAX_RETRIES > 0:
+            # Self-healing for LOCAL render CODE errors (only when cloud is NOT available):
+            if (video_path is None and not cloud_available()
+                    and render._last_error and MANIM_MAX_RETRIES > 0):
                 error_msg = render._last_error
                 if "cancelled" not in error_msg.lower():
                     for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
@@ -1006,6 +1014,7 @@ async def _send_animation(
             await bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
             reasoning_tag = f" | {GPT_REASONING_EFFORT} reasoning" if GPT_REASONING_EFFORT else ""
             format_tag = " 📱 TikTok 9:16" if tiktok_mode else ""
+            cloud_tag = " ☁️ cloud" if cloud_available() else ""
             video_file = FSInputFile(str(video_path))
 
             # Inline keyboard for feedback
@@ -1022,7 +1031,7 @@ async def _send_animation(
 
             sent = await message.reply_video(
                 video=video_file,
-                caption=f"🎬 `{GPT_MODEL}` | {theme.name}{reasoning_tag}{format_tag}\n\n💬 Reply to this video with changes like _\"make it slower\"_ or _\"add more details\"_",
+                caption=f"🎬 `{GPT_MODEL}` | {theme.name}{reasoning_tag}{format_tag}{cloud_tag}\n\n💬 Reply to this video with changes like _\"make it slower\"_ or _\"add more details\"_",
                 reply_markup=feedback_kb,
             )
 
@@ -1056,43 +1065,6 @@ async def _send_animation(
                 )
                 _d1_tasks.add(d1_task)
                 d1_task.add_done_callback(_d1_tasks.discard)
-
-            # Cloud render dispatch (fire-and-forget). If cloud is enabled, dispatch
-            # a high-quality render to GitHub Actions. When ready, send HD as reply
-            # to the original message. This runs in background so the user gets the
-            # local preview immediately.
-            if cloud_available() and not skip_cache:
-                async def _cloud_hd_dispatch() -> None:
-                    """Dispatch cloud render and send HD when ready."""
-                    try:
-                        logger.info(f"Dispatching cloud render for chat_id={chat_id}")
-                        hd_path = await cloud_render.cloud_render(
-                            code,
-                            quality=get_cloud_quality(),
-                            fps=get_cloud_fps(),
-                            dest_dir=Path("tmp/cloud") / str(chat_id),
-                        )
-                        if hd_path and hd_path.exists():
-                            # Send HD video as reply to original message
-                            hd_file = FSInputFile(str(hd_path))
-                            hd_msg = await message.reply_video(
-                                video=hd_file,
-                                caption=f"🎬 HD version (1080p/60fps from cloud)",
-                            )
-                            # Save HD to D1 cache
-                            if hd_msg.video:
-                                hd_cache_key = f"{cache_key}|hd=1"
-                                await d1.save_render(chat_id, hd_cache_key, code, hd_msg.video.file_id)
-                            logger.info(f"Cloud render complete for chat_id={chat_id}: {hd_path}")
-                        else:
-                            logger.warning(f"Cloud render failed for chat_id={chat_id}: {cloud_render.cloud_render_last_error}")
-                    except Exception as e:
-                        logger.warning(f"Cloud render dispatch error (non-fatal): {e}")
-
-                _cloud_tasks: set[asyncio.Task] = set()
-                cloud_task = asyncio.create_task(_cloud_hd_dispatch())
-                _cloud_tasks.add(cloud_task)
-                cloud_task.add_done_callback(_cloud_tasks.discard)
 
             logger.info(f"Animation done — chat_id={chat_id}, prompt={prompt[:50]}…")
 
