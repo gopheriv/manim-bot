@@ -104,6 +104,24 @@ def test_full_cloud_render(monkeypatch):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_download_into_reused_dest_no_collision(monkeypatch):
+    # Regression: a chat's dest_dir already holds render.mp4 from a prior render.
+    # gh run download refuses to overwrite existing files, so the download must
+    # land in a fresh per-job subdir, not clobber/collide with the root file.
+    _cfg(monkeypatch)
+    d = Path(tempfile.mkdtemp())
+    try:
+        (d / "render.mp4").write_bytes(b"\x00" * 4096)  # leftover from a prior render
+        fake = FakeGh("jReuse")
+        monkeypatch.setattr(cr, "_gh", fake)
+        out = run(cr.await_render("jReuse", d))
+        assert out is not None and out.exists()
+        assert out.parent != d  # isolated in its own per-job subdir
+        assert out.parent.name == "render-jReuse"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_failed_conclusion(monkeypatch):
     _cfg(monkeypatch)
     fake = FakeGh("j4", conclusion="failure")

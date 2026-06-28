@@ -15,8 +15,12 @@ import asyncio
 import sys
 from pathlib import Path
 
-import cloud_render as cr
-from config import CLOUD_RENDER_REPO
+# Allow `python deploy/smoke_cloud.py` from anywhere: cloud_render.py and
+# config.py live at the repo root (this file's parent's parent).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import cloud_render as cr  # noqa: E402
+from config import CLOUD_RENDER_REPO  # noqa: E402
 
 SCENE = (
     "from manim import *\n"

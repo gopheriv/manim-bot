@@ -15,6 +15,7 @@ import base64
 import gzip
 import json
 import logging
+import shutil
 import uuid
 from pathlib import Path
 
@@ -234,15 +235,23 @@ async def await_render(
 
 
 async def _download_artifact(run_id: int, job_id: str, dest_dir: Path, repo: str) -> Path | None:
+    # `gh run download` refuses to overwrite existing files. Callers reuse
+    # dest_dir (e.g. one dir per chat), so a second render's render.mp4 would
+    # collide with the first's and fail ("The file exists"). Download into a
+    # fresh per-job subdir — unique per render, so collisions are impossible.
+    job_dir = dest_dir / f"render-{job_id}"
+    if job_dir.exists():
+        shutil.rmtree(job_dir, ignore_errors=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
     rc, out, err = await _gh(
         "run", "download", str(run_id), "--repo", repo,
-        "-n", f"render-{job_id}", "-D", str(dest_dir),
+        "-n", f"render-{job_id}", "-D", str(job_dir),
         timeout=180,
     )
     if rc != 0:
         _set_error(f"artifact download failed (rc={rc}): {err.strip()}")
         return None
-    mp4s = sorted(dest_dir.rglob("*.mp4"), key=lambda p: p.stat().st_size, reverse=True)
+    mp4s = sorted(job_dir.rglob("*.mp4"), key=lambda p: p.stat().st_size, reverse=True)
     if not mp4s:
         _set_error("no .mp4 found in downloaded artifact")
         return None
