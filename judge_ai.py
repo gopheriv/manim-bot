@@ -316,7 +316,9 @@ async def repair_by_judge(
             "role": "user",
             "content": (
                 f"Original request: {original_prompt}\n\n"
-                f"Current code:\n```python\n{manim_code[:4000]}\n```\n\n"
+                # Full code (generous guard) — a 4000-char cap could hide the very
+                # line the Judge's "Line N: …" instruction points at.
+                f"Current code:\n```python\n{manim_code[:12000]}\n```\n\n"
                 f"Judge found {len(judge_review.critical_issues)} correctness issue(s):\n"
                 + "\n".join(f"- {i}" for i in judge_review.critical_issues)
             ),

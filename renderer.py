@@ -403,8 +403,35 @@ def _compact_manim_error(stdout: str, stderr: str) -> str:
             match = matches[-1]
             if isinstance(match, tuple):
                 match = " ".join(match)
-            return str(match)[-2200:]
-    return combined[-2200:]
+            # Keep a generous tail so the code-repair model sees the real cause.
+            return str(match)[-4000:]
+    return combined[-4000:]
+
+
+# Resource-failure markers — these come straight from the strings render() sets
+# when it blocks/kills a render (see the `render._last_error = …` assignments
+# above). They describe a SYSTEM condition (RAM/time), not a code bug, so the LLM
+# code-repair path cannot fix them and must not be invoked for them.
+_RESOURCE_ERROR_MARKERS = (
+    "render blocked: system ram",
+    "render killed: system ram",
+    "timed out after",
+    "the scene is too heavy",
+    "memoryerror",
+    "out of memory",
+    "cannot allocate",
+)
+
+
+def classify_render_error(err: str | None) -> str:
+    """Classify a render failure as "resource" (RAM/timeout — code can't fix it)
+    or "code" (a genuine code defect the LLM self-heal should try to repair)."""
+    if not err:
+        return "code"
+    low = err.lower()
+    if any(marker in low for marker in _RESOURCE_ERROR_MARKERS):
+        return "resource"
+    return "code"
 
 
 def _write_scene(code: str, chat_id: int) -> Path:

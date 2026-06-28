@@ -63,7 +63,7 @@ JUDGE_MAX_ITERATIONS = _getint("JUDGE_MAX_ITERATIONS", 2)
 # ── Manim rendering ─────────────────────────────────────────────────────────
 MANIM_QUALITY = _get("MANIM_QUALITY", "-qm")  # fallback only; render tier default wins
 MANIM_TIMEOUT = _getint("MANIM_TIMEOUT", 600)  # 10 minutes
-MANIM_MAX_RETRIES = _getint("MANIM_MAX_RETRIES", 1)  # self-heal attempts
+MANIM_MAX_RETRIES = _getint("MANIM_MAX_RETRIES", 2)  # self-heal attempts (code bugs only)
 
 # ── Render tier (quality scales with available hardware) ─────────────────────
 # auto = detect from RAM/CPU; or force cinematic | standard | constrained

@@ -172,7 +172,10 @@ async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_p
 async def fix_manim_code(original_prompt: str, error: str, theme_instructions: str = "", original_code: str = "") -> str:
     """Fix broken Manim code (Qwen 3.7 Max, reasoning ON, large output)."""
     try:
-        code_context = f"\n\nBroken code:\n```python\n{original_code[:4000]}\n```" if original_code else ""
+        # Send the full failing code (generous guard) — truncating to 4000 chars
+        # hid the actual broken line for any non-trivial scene, so the fix model
+        # was guessing. The output ceiling (MANIM_MAX_OUTPUT_TOKENS) is large.
+        code_context = f"\n\nBroken code:\n```python\n{original_code[:12000]}\n```" if original_code else ""
         messages = [
             {"role": "system", "content": build_manim_fix_prompt(error, theme_instructions, original_prompt)},
             {"role": "user", "content": f"Original request: {original_prompt}{code_context}\n\nFix the error: {error}"},

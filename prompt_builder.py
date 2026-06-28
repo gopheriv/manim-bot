@@ -12,9 +12,18 @@ from __future__ import annotations
 from render_tier import Tier, get_tier
 
 
+# Detect the installed Manim version once so prompts can pin the API surface the
+# model must target (prevents fixes from reintroducing removed/renamed APIs).
+try:
+    import manim as _manim
+    MANIM_VERSION = getattr(_manim, "__version__", "0.20.x")
+except Exception:
+    MANIM_VERSION = "0.20.x"
+
+
 # ── Core rules ────────────────────────────────────────────────────────────────
 
-BASE_MANIM_RULES = """You write Manim Community Edition animation code.
+BASE_MANIM_RULES = f"""You write Manim Community Edition animation code.
 Output ONLY Python code. No explanation, no markdown fences.
 
 ## Structure
@@ -26,6 +35,15 @@ Output ONLY Python code. No explanation, no markdown fences.
 - Use ONLY Manim CE built-ins — no external libs, no network
 - Set properties via methods: `.set_stroke()`, `.set_fill()`, `.set_opacity()` — avoid kwargs like `stroke_color=` in constructors when possible
 - Duration and complexity are governed by the performance/budget section below
+
+## MANIM VERSION & API SAFETY (CRITICAL)
+- Target Manim Community Edition v{MANIM_VERSION}. Use ONLY methods, classes and
+  keyword arguments that exist in this version — verify each one, do not invent.
+- These were REMOVED or RENAMED — NEVER use them (use the replacement):
+  `ShowCreation` → `Create`; `TextMobject`/`TexMobject` → `Text`/`Tex`/`MathTex`;
+  `get_graph` → `axes.plot`; `ApplyMethod(m.x())` → `m.animate.x()`;
+  `CONFIG = {{...}}` class dicts (pass args to `__init__` instead);
+  `ShowCreationThenFadeOut`/`ShowCreationThenDestruction` → `ShowPassingFlash`.
 
 ## NUMPY 2.x COMPATIBILITY (CRITICAL)
 - NEVER use `np.math.*` — use `math.*` (import math)

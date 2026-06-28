@@ -8,6 +8,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import psutil
+
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
@@ -42,7 +44,7 @@ from scene_validator import validate_layout, has_issues
 from markdown_utils import strip_markdown
 from queue_manager import render_queue, TaskStatus
 from rate_limiter import rate_limiter
-from renderer import render, cleanup, get_last_generated_code
+from renderer import render, cleanup, get_last_generated_code, classify_render_error
 from render_tier import get_tier
 import settings as user_settings
 from themes import get_theme, next_theme, build_theme_prompt, THEME_ORDER
@@ -292,6 +294,20 @@ async def _send_animation(
     existing = render_queue.get_user_task(chat_id)
     if existing:
         await _safe_reply(message, f"⏳ You already have a render in progress: `{existing.prompt[:50]}…`")
+        return
+
+    # Pre-flight memory gate (truest fail-fast). The renderer blocks any render
+    # at >85% RAM, so if we're already there, generating code + judging it would
+    # just be thrown away when the render is blocked. Fail honestly now and spend
+    # no LLM calls. (Threshold mirrors renderer.render's >85% block.)
+    mem = psutil.virtual_memory()
+    if mem.percent > 85:
+        free_gb = mem.available / 1024 ** 3
+        await _safe_reply(message, (
+            f"⚠️ The server is low on memory right now (only {free_gb:.1f} GB free). "
+            f"Renders need headroom — please close other apps or try again in a few minutes."
+        ))
+        analytics.log_render_failure(chat_id, "resource_blocked_preflight")
         return
 
     # Get user settings. Quality precedence: explicit arg (e.g. /draft) >
@@ -723,7 +739,37 @@ async def _send_animation(
                 await _safe_reply(message, "❌ Render cancelled.")
                 return
 
-            # Self-healing: up to 2 retries with escalating simplification
+            # Resource failures (RAM / timeout) cannot be fixed by rewriting code:
+            # an OOM/timeout would re-render into the same wall, and even the
+            # lightweight fallback render would be blocked at >85% RAM. Fail fast
+            # with an honest message and spend NO LLM repair calls.
+            if (video_path is None and render._last_error
+                    and classify_render_error(render._last_error) == "resource"):
+                err = render._last_error
+                low = err.lower()
+                if "timed out" in low or "too heavy" in low:
+                    msg = (
+                        f"⚠️ That scene was too heavy and timed out at {MANIM_TIMEOUT}s. "
+                        f"Try a simpler prompt or fewer moving parts."
+                    )
+                    reason = "resource_timeout"
+                else:
+                    free_gb = psutil.virtual_memory().available / 1024 ** 3
+                    msg = (
+                        f"⚠️ The render couldn't run — the server is low on memory right now "
+                        f"({free_gb:.1f} GB free). Please close other apps or try again shortly."
+                    )
+                    reason = "resource_blocked"
+                logger.warning("Render hit a resource limit (%s) — failing fast, skipping code repair + fallback", reason)
+                task.status = TaskStatus.FAILED
+                task.error_message = err[:500]
+                task.completed_at = datetime.now()
+                analytics.log_render_failure(chat_id, reason)
+                await _safe_reply(message, msg)
+                return
+
+            # Self-healing (CODE errors only — resource errors returned above):
+            # up to MANIM_MAX_RETRIES attempts with escalating simplification.
             if video_path is None and render._last_error and MANIM_MAX_RETRIES > 0:
                 error_msg = render._last_error
                 if "cancelled" not in error_msg.lower():
@@ -751,6 +797,7 @@ async def _send_animation(
                                         prompt,
                                         f"Previous repair also failed. SIMPLIFY the scene: reduce object count, remove heavy updaters, fewer self.play() calls, shorter duration. Error: {error_msg}",
                                         theme_prompt,
+                                        original_code=fixed_code,
                                     )
                                     if fixed_code and fixed_code.strip():
                                         fixed_code = strip_code_fences(fixed_code)
