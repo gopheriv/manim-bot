@@ -116,11 +116,19 @@ def _apply_fps_override(tier: Tier) -> Tier:
 
 
 def detect_tier() -> Tier:
-    """Pick a tier from RENDER_TIER override or auto-detect RAM/CPU."""
+    """Pick a tier from RENDER_TIER override, cloud-farm status, or local RAM/CPU."""
     forced = RENDER_TIER
     if forced in _TIERS:
         logger.info("Render tier forced via RENDER_TIER=%s", forced)
         return _apply_fps_override(_TIERS[forced])
+
+    # When the cloud render farm is active, the actual render happens on the
+    # 16 GB worker — so BOTH code generation and quality target the cloud
+    # cinematic tier, not this box's constrained budget. (Code-gen is just LLM
+    # API calls; nothing heavy runs locally.)
+    if cloud_available():
+        logger.info("Render tier: cloud_cinematic (cloud render farm active)")
+        return _apply_fps_override(CLOUD_CINEMATIC)
 
     try:
         total_gb = psutil.virtual_memory().total / 1024 ** 3

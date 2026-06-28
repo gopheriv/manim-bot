@@ -122,6 +122,27 @@ def test_download_into_reused_dest_no_collision(monkeypatch):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_download_purges_stale_leftovers(monkeypatch):
+    # A reused chat dir holds a legacy root render.mp4 (from pre-fix code) and an
+    # old per-job subdir. The new download must isolate cleanly AND purge both.
+    _cfg(monkeypatch)
+    d = Path(tempfile.mkdtemp())
+    try:
+        (d / "render.mp4").write_bytes(b"\x00" * 4096)        # legacy leftover
+        old = d / "render-OLDJOB"
+        old.mkdir()
+        (old / "render.mp4").write_bytes(b"\x00" * 4096)      # stale prior job
+        fake = FakeGh("jNew")
+        monkeypatch.setattr(cr, "_gh", fake)
+        out = run(cr.await_render("jNew", d))
+        assert out is not None and out.exists()
+        assert out.parent.name == "render-jNew"
+        assert not (d / "render.mp4").exists(), "legacy root render.mp4 not purged"
+        assert not old.exists(), "stale prior job dir not purged"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_failed_conclusion(monkeypatch):
     _cfg(monkeypatch)
     fake = FakeGh("j4", conclusion="failure")

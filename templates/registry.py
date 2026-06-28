@@ -19,7 +19,11 @@ class TemplateRegistry:
 
     def __init__(self) -> None:
         self._templates: list[SceneTemplate] = []
-        self._confidence_threshold = 0.2  # minimum score to consider a match
+        # Minimum score to use a template. With the strength-based match_score
+        # (phrase=0.6, word=0.3), 0.5 requires a specific phrase OR two keyword
+        # words — so a single generic word can't hijack a prompt into a static
+        # template instead of the (higher-quality) cinematic LLM path.
+        self._confidence_threshold = 0.5
 
     def register(self, template: SceneTemplate) -> None:
         """Add a template to the registry."""

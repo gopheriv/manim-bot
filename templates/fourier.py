@@ -69,16 +69,18 @@ class LaplaceTransformTemplate(SceneTemplate):
 
     def generate_code(self, config: TemplateConfig) -> str:
         color = config.colors[0]
+        a_val = config.extra_params.get('damping', 0.5)
+        w_val = config.frequency
         return _common_manim_header() + _indent(f"""
 title = Text("Laplace Transform", font_size=36, color="{color}")
 title.to_edge(UP)
 self.play(Write(title, run_time=1.5))
 
 # Time domain function: e^(-at) * sin(wt)
-a = {config.extra_params.get('damping', 0.5)}
-w = {config.frequency}
+a = {a_val}
+w = {w_val}
 
-eq_time = MathTex(f"f(t) = e^{{-{{a}}t}} \\\\sin({{w}}t)", font_size=32)
+eq_time = MathTex(r"f(t) = e^{{-{a_val}t}} \\sin({w_val}t)", font_size=32)
 eq_time.to_edge(UP, buff=1)
 self.play(Write(eq_time, run_time=1.5))
 

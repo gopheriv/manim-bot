@@ -240,6 +240,19 @@ async def _download_artifact(run_id: int, job_id: str, dest_dir: Path, repo: str
     # collide with the first's and fail ("The file exists"). Download into a
     # fresh per-job subdir — unique per render, so collisions are impossible.
     job_dir = dest_dir / f"render-{job_id}"
+
+    # Self-cleaning: purge leftovers from prior renders in this reused dir so it
+    # can never accumulate or shadow a new download — old per-job subdirs AND a
+    # legacy top-level render.mp4 written by pre-collision-fix code (the exact
+    # file that produced "The file exists"). Safe: the previous render's video
+    # has already been uploaded by the time the next download runs.
+    for stale in dest_dir.glob("render-*"):
+        if stale != job_dir and stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+    legacy_mp4 = dest_dir / "render.mp4"
+    if legacy_mp4.exists():
+        legacy_mp4.unlink(missing_ok=True)
+
     if job_dir.exists():
         shutil.rmtree(job_dir, ignore_errors=True)
     job_dir.mkdir(parents=True, exist_ok=True)

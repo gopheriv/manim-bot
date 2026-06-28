@@ -55,33 +55,39 @@ class JsonSceneTemplate(SceneTemplate):
         cfg.setdefault("colors", ["#58C4DD", "#FFFFFF", "#FF8080"])
         return TemplateConfig(**{k: v for k, v in cfg.items() if k in TemplateConfig.__dataclass_fields__})
 
-    def match_score(self, prompt: str) -> float:
-        """Fuzzy keyword matching."""
-        prompt_lower = prompt.lower()
-        matches = 0
-        for kw in self._keywords:
-            if kw.lower() in prompt_lower:
-                matches += 1
-        if matches == 0:
-            return 0.0
-        return min(1.0, matches / len(self._keywords) * 0.8 + 0.2 * (1 if self._keywords[0].lower() in prompt_lower else 0))
+    # NOTE: match_score is intentionally NOT overridden — JSON templates use the
+    # shared strength-based SceneTemplate.match_score so all templates score
+    # consistently against the registry threshold. (The old override used loose
+    # substring matching — "parts" matched "particle" — and a normalization that
+    # scored an exact phrase like "cross product" at 0.47, below threshold.)
 
     def generate_code(self, config: TemplateConfig) -> str:
         """Generate Manim code from template + config."""
         code = self._code_template
 
-        # Replace placeholders
+        # Colors MUST become quoted Python string literals. Templates write them
+        # as `color={color1}` (no quotes), and substituting a bare hex produced
+        # `color=#58C4DD` — the `#` starts a comment and breaks the line (this is
+        # why most JSON templates failed to compile). Strip any quotes already
+        # around the placeholder, then substitute a single quoted value so both
+        # `{color1}` and `"{color1}"` forms come out correct exactly once.
+        colors = config.colors or []
+        color_values = (
+            colors[0] if len(colors) > 0 else "#58C4DD",
+            colors[1] if len(colors) > 1 else "#FFFFFF",
+            colors[2] if len(colors) > 2 else "#FF8080",
+        )
+        for ph, val in zip(("{color1}", "{color2}", "{color3}"), color_values):
+            code = code.replace(f'"{ph}"', ph).replace(f"'{ph}'", ph)
+            code = code.replace(ph, f'"{val}"')
+
+        # Text/number placeholders sit inside existing quotes (or numeric context).
         replacements = {
             "{title}": config.title,
             "{equation}": config.equation,
             "{description}": config.description,
             "{duration}": str(config.duration),
-            "{color1}": config.colors[0] if config.colors else "#58C4DD",
-            "{color2}": config.colors[1] if len(config.colors) > 1 else "#FFFFFF",
-            "{color3}": config.colors[2] if len(config.colors) > 2 else "#FF8080",
         }
-
-        # Add extra params
         if hasattr(config, "extra_params"):
             for key, val in config.extra_params.items():
                 replacements[f"{{{key}}}"] = str(val)

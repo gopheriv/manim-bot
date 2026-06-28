@@ -42,19 +42,25 @@ VISUAL_CRITIC_PROMPT = """You are a strict art director reviewing FRAMES (in tim
 
 Judge ONLY what you can SEE in the images. Look hard for these defects:
 - Overlapping objects, or text drawn on top of other text/shapes
+- A label/text panel drawn ON TOP OF or crossing into the main figure
+- Doubled / ghosted outlines — a shape drawn twice as an offset duplicate (looks broken)
 - Objects or labels cut off at the edges of the frame (off-screen)
+- A box/rectangle whose edge clips, touches, or crosses the text inside it
+- Muddy or clashing translucent fills (e.g. a warm/yellow fill over a cool/blue object → brown)
+- Inconsistent colours on one structure (e.g. grid lines that are part cyan, part yellow)
+- A lone moving dot / marker with no visible trail or purpose, or one that ends on top of text
 - Unreadable text: too small, too low-contrast against the background, or crowded
 - Clutter / messy "AI slop" — disorganised composition, random-looking placement
 - Poor use of the frame (everything cramped in the centre, or large empty dead zones)
-- Inconsistent or clashing colours
 - A frame that looks frozen/empty (no meaningful content)
 
 Score the overall VISUAL quality from 0-10 (10 = clean, balanced, readable, professional).
+Be strict: any doubled outline, muddy fill, panel-over-figure overlap, or stray marker caps the score at 6.
 
 Return ONLY valid JSON, no markdown fences:
 {"score": N, "pass": true/false, "issues": ["specific visible problem", ...], "regenerate_guidance": "concrete, actionable fixes the code author should make (positions, font sizes, spacing, fade-outs, colours)"}
 
-Set "pass" to true ONLY if score >= 7 AND there is no overlap, no cropping, and all text is readable.
+Set "pass" to true ONLY if score >= 7 AND there is no overlap, no doubled outline, no cropping, no muddy fill, and all text is readable.
 """
 
 

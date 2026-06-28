@@ -7,6 +7,7 @@ of code from scratch. This reduces LLM code gen time from 30-90s to 5-15s.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -52,23 +53,45 @@ class SceneTemplate(ABC):
     def match_score(self, prompt: str) -> float:
         """Score how well this template matches the user prompt (0.0-1.0).
 
-        Default: keyword-based fuzzy matching. Subclasses can override
-        for more sophisticated matching.
+        Strength-based (not fraction-based) so the score does not depend on how
+        many keywords a template happens to list. A template only earns a
+        confident score from a SPECIFIC, unambiguous signal:
+
+          - a multi-token keyword phrase present verbatim (e.g. "cross product",
+            "integration by parts") → strong, +0.6
+          - a single keyword word matched on a word boundary → +0.3
+          - a stem/inflection match (e.g. "vectors"~"vector") → +0.15
+
+        With the registry threshold (0.5) this means a template fires only on a
+        specific phrase OR two keyword words — never on one generic word like
+        "parts", "rotation" or "expansion" (those route to the LLM path, which
+        on the cinematic/cloud tier produces far better output than a static
+        template). Subclasses may override for smarter matching.
         """
-        prompt_lower = prompt.lower()
         if not self.keywords:
             return 0.0
 
-        matches = 0
-        for kw in self.keywords:
-            # Exact substring match
-            if kw in prompt_lower:
-                matches += 1.0
-            # Partial match (stem prefix)
-            elif any(kw.startswith(p) for p in prompt_lower.split() if len(p) >= 4):
-                matches += 0.5
+        prompt_lower = prompt.lower()
+        words = [w for w in re.findall(r"[a-z0-9]+", prompt_lower) if len(w) >= 3]
+        wordset = set(words)
 
-        return min(matches / max(len(self.keywords) * 0.5, 1), 1.0)
+        score = 0.0
+        for kw in self.keywords:
+            k = (kw or "").lower().strip()
+            if not k:
+                continue
+            if " " in k or "-" in k:
+                # Specific multi-token phrase — verbatim presence is a strong signal.
+                if k in prompt_lower:
+                    score += 0.6
+            elif k in wordset:
+                # Single keyword word on a word boundary (no loose substrings).
+                score += 0.3
+            elif any(len(w) >= 4 and (w.startswith(k) or k.startswith(w)) for w in words):
+                # Stem / inflection (plurals, verb forms).
+                score += 0.15
+
+        return min(score, 1.0)
 
     def default_config(self) -> TemplateConfig:
         """Return sensible defaults — LLM only needs to override what matters."""

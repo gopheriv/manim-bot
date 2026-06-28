@@ -50,6 +50,27 @@ Output ONLY Python code. No explanation, no markdown fences.
 - NEVER use `np.float`, `np.int`, `np.bool`, `np.complex`, `np.object`, `np.str`
 - Use Python builtins: `float`, `int`, `bool`, `str`
 - Use `np.float64`, `np.int64` for typed numpy scalars
+
+## VISUAL POLISH — avoid these specific defects (they look like bugs)
+- **Boxes must not clip their contents**: any `SurroundingRectangle`/`BackgroundRectangle`
+  needs `buff>=0.15`; the box edge must never touch or cross the text/glyphs inside it.
+- **Create each shape ONCE — no ghost/double outlines**: do not animate a duplicate
+  `.copy()` together with the original (it renders as a doubled, offset outline). A glow
+  copy is `add()`-ed separately AFTER creation at low opacity, never `Create`-d alongside.
+  For a cube/box wireframe use a SINGLE `Cube`/`Prism` or one `VGroup` of edges.
+- **Fills stay clean, not muddy**: keep `fill_opacity<=0.25`, and an object's fill and
+  stroke share ONE color. Never layer a warm fill (yellow/orange) over a cool object
+  (blue/teal) — translucent overlap muddies to brown.
+- **One color per structure**: grid/subdivision lines on a figure use a SINGLE consistent
+  color, not a cyan+yellow mix. Reserve a second accent only for a deliberate highlight.
+- **Panels never overlap the hero**: place explanatory text/equation panels in EMPTY
+  screen space with `buff>=0.4` from the main figure; if a panel would overlap it, shift
+  the figure aside first. Never draw a label box on top of the main object.
+- **No stray markers**: a moving dot / `TracedPath` must leave a VISIBLE trail and end at
+  a meaningful point. Never leave a lone dot wandering with no trace, and never let it end
+  on top of text.
+- **Use the whole frame**: don't leave half the frame empty for more than ~2s — bring in
+  the label/equation on the empty side early, or center the hero object.
 """
 
 # ── Style directives (concise) ────────────────────────────────────────────────
@@ -74,6 +95,13 @@ Use `LaggedStart` for staggered reveals. Use `Create`/`Write` over `FadeIn` for 
 - `TracedPath` on ONE moving element (not multiple)
 - `ValueTracker` + `always_redraw` for animated parameters
 - `BackgroundRectangle` behind text for readability
+
+## Direction within the budget
+Even at these strict limits, still DIRECT it: use color semantically (one concept = one
+color, consistently); morph equations with `TransformMatchingTex`/`ReplacementTransform`
+instead of fade-and-replace; reveal information step by step to build intuition rather than
+dumping the answer; and vary transitions (`GrowFromCenter`, `Indicate`, `Circumscribe`),
+not just `FadeIn`. Beauty within the 3-layer budget — not minimalism for its own sake.
 """
 
 # ── HARDWARE BUDGET (the critical addition) ───────────────────────────────────
@@ -144,32 +172,94 @@ HARDWARE_3D_LIMITS = """## 3D Scene Limits (only when 3D is requested)
 
 # ── Ambition-first house style (capable tiers) ───────────────────────────────
 
-CINEMATIC_STYLE = """## Visual Direction (cinematic — aim for a professionally directed explainer)
-Make it clear AND beautiful. Compose every frame on purpose.
+CINEMATIC_STYLE = """## DIRECTION — compose like an award-winning motion designer
+You are DIRECTING a professionally produced educational animation, not emitting code.
+Before writing code, design the shot: visual storytelling, pacing, rhythm, surprise,
+visual hierarchy, camera language, color harmony, composition, and educational clarity.
+Every frame should read like a deliberately designed illustration; every second should
+carry meaningful motion. If a professional motion designer would not find a beat visually
+interesting, redesign it. Do NOT produce a template animation — invent a unique visual idea.
 
-- **Composition**: think in layers — a subtle background/atmosphere, the supporting
-  structure (axes, grids, vectors), and the hero mathematical object in front. Use the
-  WHOLE frame; balance negative space; don't cluster everything at the origin.
-- **Semantic, consistent color**: each concept keeps its color across equations, graphs,
-  vectors and labels. Pick a small, cohesive palette and stick to it.
-- **Strong motion design**: `Create`/`Write`/`DrawBorderThenFill` for hero objects,
-  `LaggedStart` for staggered reveals, `ReplacementTransform` to morph between related
-  forms. Ease with `rate_func` (smooth, there_and_back). No dead frames > 0.4s.
-- **Camera as a tool**: with `MovingCameraScene`, push in on the key moment, frame a
-  detail, or pull back to reveal scale — only when it serves the idea.
-- **Polish**: a soft glow on the hero object, a faint guiding grid, a gentle ambient
-  drift to close (never a hard freeze frame).
-- **Pacing by cognitive load**: simple beats ~2s, rich transforms 4-6s. Total duration
-  20-40s is welcome when the content earns it.
+## MOTION DESIGN — no static scenes
+Objects enter elegantly, transform naturally, move with purpose, and react to their
+neighbours. Avoid abrupt jumps — interpolate. In preference to plain Fade/Write, reach for:
+`TransformMatchingTex`, `TransformMatchingShapes`, `ReplacementTransform`, `FadeTransform`,
+`FadeTransformPieces`, `MoveToTarget`, `LaggedStart` (tune `lag_ratio`), `AnimationGroup`,
+`Succession`, `UpdateFromFunc`, `always_redraw` + `ValueTracker`. Vary entrances and
+emphasis: `GrowFromCenter`, `GrowArrow`, `Circumscribe`, `Flash`, `Indicate`, `FocusOn`.
+Never repeat the same reveal twice in a row.
 
-Aim for 4-7 well-composed visual beats with clean transitions between them.
+## RHYTHM — let important ideas breathe
+Alternate fast / slow / pause / emphasis. Vary `run_time` and `rate_func` (`smooth`,
+`there_and_back`, `ease_in_out`). Hold on the key insight; move briskly through routine
+steps. Avoid constant-speed motion.
+
+## COMPOSITION — frame every shot
+Balanced layouts, intentional whitespace, clear focal points, depth and layering
+(foreground/background separation), symmetry where it helps and deliberate asymmetry where
+it adds energy. Never dump everything on screen — reveal gradually via progressive
+disclosure. Use the WHOLE frame; don't cluster at the origin or leave half the frame dead
+for more than ~2s.
+
+## CAMERA — part of the storytelling
+Prefer `class GenScene(MovingCameraScene):` and direct the camera with intent —
+`self.camera.frame.animate.scale(...)` / `.move_to(...)` to push in on the decisive moment,
+follow motion, frame a detail, or pull back to reveal scale. Every camera move must have a
+reason; no aimless drift. (Use `ThreeDScene` instead only when the concept is genuinely 3D.)
+
+## EDUCATIONAL STORYTELLING — build intuition, don't dump the answer
+Reveal step by step and create anticipation: each beat answers the viewer's current
+question while opening the next. Turn abstractions into VISUAL METAPHORS so the viewer
+FEELS the math — a function as a machine, a limit as a zoom, a derivative as tangent
+motion, an integral as accumulating area, a vector as a force, a matrix transforming space,
+a complex number rotating the plane, probability as flowing particles.
+
+## EQUATIONS ARE ALIVE
+Symbols move, merge, split, rearrange and morph rather than vanishing and reappearing. Use
+`TransformMatchingTex` extensively so a term visibly travels from one line to the next.
+Reuse and MOVE/reshape objects instead of deleting and recreating them.
+
+## RICH, PROGRESSIVE DIAGRAMS — never minimal
+Build axes, grids, labels, callouts, highlight regions, dynamic arrows, measurements,
+animated braces, and legends — assembled progressively, not all at once. Keep live-updating
+values (`DecimalNumber` + `always_redraw`) where they aid clarity.
+
+## LAYERED ANIMATION — multiple things at once
+Each scene runs several simultaneous layers: the hero animation, supporting annotations, a
+subtle background motion, a camera move, and highlighting — not a single object moving in
+isolation.
+
+## POLISH (only when it improves clarity)
+Tasteful glow (a low-opacity stroke copy added BEHIND the hero — added, never `Create`-d
+alongside it), highlights, a single motion trail (`TracedPath` on ONE element, with a
+visible trail that ends meaningfully), temporary guides, attention cues, animated
+measurements and legends. Close on intentional ambient motion, never a hard freeze frame.
+
+## CODE CRAFT
+Structure the scene logically with small, well-named helper functions; avoid duplication;
+name mobjects for what they represent. Keep everything deterministic (fixed seeds; no
+wall-clock or per-run randomness) so the same code always renders the same film.
+
+Aim for 5-8 well-composed visual beats with clean, varied transitions between them.
 """
 
-ANTI_LAZY_CINEMATIC = """## Quality Floor (cinematic)
+COLOR_LANGUAGE = """## COLOR LANGUAGE — meaning, not decoration
+Choose ONE cohesive palette and use color SEMANTICALLY and consistently across the whole
+scene — a concept keeps its color in equations, graphs, vectors and labels. Default roles:
+- blue = known / given          - red = contradiction / warning
+- yellow = current focus         - purple = auxiliary / construction
+- green = result / conclusion    - orange = transformation in progress
+Honor the active VISUAL THEME's palette when one is provided. Never colour at random.
+"""
+
+ANTI_LAZY_CINEMATIC = """## QUALITY FLOOR (cinematic)
 - A clear narrative arc: hook → build → insight → resolution.
-- Multiple coordinated elements working together — not just a title and one equation.
-- Every object earns its place; remove clutter rather than adding filler.
-- Close on intentional ambient motion, not a frozen frame.
+- Every second has meaningful motion across MULTIPLE coordinated layers — never a static
+  frame, never just a title and one equation.
+- Prefer morph/transform over fade-and-replace; reuse and move objects rather than deleting
+  and recreating them.
+- Every object earns its place — remove clutter rather than adding filler.
+- Surprise the viewer at least once; close on deliberate ambient motion, not a frozen frame.
 """
 
 
@@ -194,7 +284,7 @@ def _style_and_budget_sections(tier: Tier) -> list[str]:
     """Return the tier-appropriate style + performance sections."""
     if tier.name == "constrained":
         return [_constrained_budget()]
-    return [CINEMATIC_STYLE, _cinematic_budget(tier), ANTI_LAZY_CINEMATIC]
+    return [CINEMATIC_STYLE, COLOR_LANGUAGE, _cinematic_budget(tier), ANTI_LAZY_CINEMATIC]
 
 
 def budget_block(tier: Tier | None = None) -> str:
