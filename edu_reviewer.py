@@ -15,13 +15,6 @@ from config import CHAT_MODEL
 
 logger = logging.getLogger(__name__)
 
-try:
-    from sympy import sympify, Eq, simplify
-    from sympy.parsing.latex import parse_latex
-    SYMPY_AVAILABLE = True
-except ImportError:
-    SYMPY_AVAILABLE = False
-
 
 @dataclass
 class EducationReview:

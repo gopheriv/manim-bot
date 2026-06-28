@@ -10,7 +10,7 @@ import os
 import platform
 import re
 import shutil
-import signal
+import tempfile
 from pathlib import Path
 
 import psutil
@@ -26,7 +26,7 @@ DEFAULT_QUALITY = os.getenv("MANIM_QUALITY", "-qm")
 if IS_LINUX:
     RENDER_DIR = Path(os.getenv("RENDER_DIR", "/tmp/manim_render"))
 else:
-    RENDER_DIR = Path(os.getenv("RENDER_DIR", "C:/Users/sunak/AppData/Local/Temp/manim_render"))
+    RENDER_DIR = Path(os.getenv("RENDER_DIR", str(Path(tempfile.gettempdir()) / "manim_render")))
 
 SCENE_DIR = RENDER_DIR
 RENDER_DIR.mkdir(parents=True, exist_ok=True)

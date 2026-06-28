@@ -6,10 +6,8 @@ Returns a list of human-readable issues for the layout repair step.
 
 from __future__ import annotations
 
-import ast
 import logging
 import re
-from collections import Counter
 
 logger = logging.getLogger(__name__)
 

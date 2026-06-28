@@ -34,7 +34,6 @@ async def transcribe_voice(ogg_path: Path) -> str | None:
         return None
 
     try:
-        import subprocess
 
         # Convert OGG Opus → WAV for speech_recognition
         wav_path = ogg_path.with_suffix(".wav")

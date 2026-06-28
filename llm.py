@@ -16,8 +16,6 @@ from config import (
     GPT_MODEL,
     GPT_BASE_URL,
     GPT_API_KEY,
-    IMAGE_MODEL,
-    GPT_REASONING_EFFORT,
     CLAUDE_BASE_URL,
     CLAUDE_API_KEY,
     CLAUDE_MODEL,

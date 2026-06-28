@@ -8,9 +8,8 @@ needs to fill a small JSON config instead of generating 200+ lines of code.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from templates.base import SceneTemplate, TemplateConfig, TemplateMatch
+from templates.base import SceneTemplate, TemplateMatch
 
 logger = logging.getLogger(__name__)
 

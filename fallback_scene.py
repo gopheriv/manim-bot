@@ -7,7 +7,6 @@ return a valid, lightweight animation instead of failing the user request.
 from __future__ import annotations
 
 import re
-from textwrap import indent
 
 
 def _safe_title(prompt: str, max_len: int = 54) -> str:

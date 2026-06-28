@@ -35,10 +35,14 @@ def _get_duration_sync(path: Path) -> float:
     except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
         pass
     # Fallback: ffmpeg -i (slower but works)
-    result = subprocess.run(
-        [FFMPEG, "-i", str(path), "-hide_banner"],
-        capture_output=True, text=True, creationflags=0x08000000,
-    )
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-i", str(path), "-hide_banner"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=0x08000000,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return 0.0
     for line in result.stderr.splitlines():
         if "Duration:" in line:
             time_str = line.split("Duration:")[1].split(",")[0].strip()
