@@ -83,7 +83,29 @@ CONSTRAINED = Tier(
     below_normal_priority=True,
 )
 
-_TIERS = {"cinematic": CINEMATIC, "standard": STANDARD, "constrained": CONSTRAINED}
+# Cloud cinematic — dispatched to GitHub Actions worker (16 GB, 4 vCPU).
+# Used when CLOUD_RENDER_ENABLED=True. The local machine renders a low-res
+# preview first, then the cloud worker produces the HD version.
+CLOUD_CINEMATIC = Tier(
+    name="cloud_cinematic",
+    default_quality="-qh",      # 1080p (cloud renders at this)
+    fps=60,
+    weight_threshold=200,       # cloud has headroom — very generous budget
+    allow_surface=True,
+    allow_3d=True,
+    max_updaters=8,
+    point_budget=200,
+    downgrade_quality="-qh",    # never drop on cloud
+    downgrade_fps=60,
+    below_normal_priority=False,
+)
+
+_TIERS = {
+    "cinematic": CINEMATIC,
+    "standard": STANDARD,
+    "constrained": CONSTRAINED,
+    "cloud_cinematic": CLOUD_CINEMATIC,
+}
 
 
 def _apply_fps_override(tier: Tier) -> Tier:
@@ -128,3 +150,19 @@ def get_tier() -> Tier:
     if _active_tier is None:
         _active_tier = detect_tier()
     return _active_tier
+
+
+def cloud_available() -> bool:
+    """Check if cloud render farm is enabled and configured."""
+    from config import CLOUD_RENDER_ENABLED, CLOUD_RENDER_REPO
+    return bool(CLOUD_RENDER_ENABLED and CLOUD_RENDER_REPO)
+
+
+def get_cloud_quality() -> str:
+    """Return the quality for cloud renders (always 1080p)."""
+    return "-qh"
+
+
+def get_cloud_fps() -> int:
+    """Return the fps for cloud renders (60fps)."""
+    return 60

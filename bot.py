@@ -45,7 +45,7 @@ from markdown_utils import strip_markdown
 from queue_manager import render_queue, TaskStatus
 from rate_limiter import rate_limiter
 from renderer import render, cleanup, get_last_generated_code, classify_render_error
-from render_tier import get_tier
+from render_tier import get_tier, cloud_available, get_cloud_quality, get_cloud_fps
 import settings as user_settings
 from themes import get_theme, next_theme, build_theme_prompt, THEME_ORDER
 from voiceover import add_voiceover
@@ -53,6 +53,7 @@ from templates import get_registry
 from tiktok_integration import detect_tiktok_mode
 from prompt_builder_tiktok import get_tiktok_prompt
 from feedback import log_feedback
+import cloud_render
 from watermark import add_watermark
 from prompt_enhancer import enhance_prompt
 from critic_agent import critique_code, static_quality_check
@@ -65,7 +66,7 @@ from gallery import GALLERY_CATALOG, get_featured, get_by_category, get_by_id, s
 from multi_agent_debate import debate_generate
 from visual_critic import critique_render
 from referral import register_user, get_user_referral_info, get_referral_stats, use_bonus_render
-from teacher_dashboard import register_teacher, get_teacher_dashboard, get_engagement_stats
+from teacher_dashboard import register_teacher, get_teacher_dashboard, get_engagement_stats, add_student
 
 # Ensure log directory exists before configuring handlers
 from pathlib import Path
@@ -991,6 +992,43 @@ async def _send_animation(
                 _d1_tasks.add(d1_task)
                 d1_task.add_done_callback(_d1_tasks.discard)
 
+            # Cloud render dispatch (fire-and-forget). If cloud is enabled, dispatch
+            # a high-quality render to GitHub Actions. When ready, send HD as reply
+            # to the original message. This runs in background so the user gets the
+            # local preview immediately.
+            if cloud_available() and not skip_cache:
+                async def _cloud_hd_dispatch() -> None:
+                    """Dispatch cloud render and send HD when ready."""
+                    try:
+                        logger.info(f"Dispatching cloud render for chat_id={chat_id}")
+                        hd_path = await cloud_render.cloud_render(
+                            code,
+                            quality=get_cloud_quality(),
+                            fps=get_cloud_fps(),
+                            dest_dir=Path("tmp/cloud") / str(chat_id),
+                        )
+                        if hd_path and hd_path.exists():
+                            # Send HD video as reply to original message
+                            hd_file = FSInputFile(str(hd_path))
+                            hd_msg = await message.reply_video(
+                                video=hd_file,
+                                caption=f"🎬 HD version (1080p/60fps from cloud)",
+                            )
+                            # Save HD to D1 cache
+                            if hd_msg.video:
+                                hd_cache_key = f"{cache_key}|hd=1"
+                                await d1.save_render(chat_id, hd_cache_key, code, hd_msg.video.file_id)
+                            logger.info(f"Cloud render complete for chat_id={chat_id}: {hd_path}")
+                        else:
+                            logger.warning(f"Cloud render failed for chat_id={chat_id}: {cloud_render.cloud_render_last_error}")
+                    except Exception as e:
+                        logger.warning(f"Cloud render dispatch error (non-fatal): {e}")
+
+                _cloud_tasks: set[asyncio.Task] = set()
+                cloud_task = asyncio.create_task(_cloud_hd_dispatch())
+                _cloud_tasks.add(cloud_task)
+                cloud_task.add_done_callback(_cloud_tasks.discard)
+
             logger.info(f"Animation done — chat_id={chat_id}, prompt={prompt[:50]}…")
 
         except Exception as e:
@@ -1064,7 +1102,7 @@ async def cmd_draft(message: types.Message) -> None:
         await _safe_reply(message, "⚠️ No animation found. Render something first!")
         return
     original_prompt = last_render["prompt"]
-    await _safe_reply(message, "📝 Draft mode: quick preview at 480p, 60s timeout...")
+    await _safe_reply(message, "📝 Draft mode: quick low-resolution preview (480p)…")
     await _send_animation(message, original_prompt, quality="-l")
 
 
@@ -1687,6 +1725,45 @@ async def cmd_teacher(message: types.Message) -> None:
     await _safe_reply(message, "\n".join(lines))
 
 
+@dp.message(Command("class"))
+async def cmd_class(message: types.Message) -> None:
+    """Teacher class management: /class add <student_id> | /class stats."""
+    chat_id = message.chat.id
+    if not get_teacher_dashboard(chat_id):
+        await _safe_reply(message, "👩‍🏫 You're not registered as a teacher yet. Send /teacher first.")
+        return
+
+    args = (message.text or "").replace("/class", "", 1).strip().split()
+    if not args:
+        await _safe_reply(message, (
+            "👩‍🏫 **Class Management**\n\n"
+            "• `/class add <student_id>` — add a student to your class\n"
+            "• `/class stats` — view engagement analytics"
+        ))
+        return
+
+    sub = args[0].lower()
+    if sub == "add":
+        if len(args) < 2 or not args[1].lstrip("-").isdigit():
+            await _safe_reply(message, "Usage: `/class add <student_id>` (a numeric Telegram ID)")
+            return
+        if add_student(chat_id, int(args[1])):
+            await _safe_reply(message, f"✅ Student `{args[1]}` added to your class.")
+        else:
+            await _safe_reply(message, "⚠️ Couldn't add student. Send /teacher to register first.")
+    elif sub == "stats":
+        eng = get_engagement_stats(chat_id)
+        await _safe_reply(message, (
+            "📊 **Class Engagement**\n\n"
+            f"**Students:** {eng['students']}\n"
+            f"**Total views:** {eng['total_views']}\n"
+            f"**Avg views/student:** {eng['avg_views_per_student']}\n"
+            f"**Engagement rate:** {eng['engagement_rate']:.0f}%"
+        ))
+    else:
+        await _safe_reply(message, "Unknown subcommand. Use `/class add <student_id>` or `/class stats`.")
+
+
 @dp.message(F.web_app_data)
 async def handle_webapp_data(message: types.Message) -> None:
     """Handle settings sent from Telegram WebApp."""
@@ -1908,11 +1985,13 @@ async def handle_text(message: types.Message) -> None:
 
     # Check if this is a reply to a previous animation (follow-up edit)
     if message.reply_to_message and message.reply_to_message.video:
-        # User replied to an animation with edit instructions
-        last_render = db.get_last_render(chat_id)
-        if last_render and last_render.get("code"):
-            original_prompt = last_render.get("prompt", "")
-            last_code = last_render.get("code", "")
+        # Target the EXACT video replied to (by its file_id), falling back to the
+        # user's last render if that specific one isn't found in the DB.
+        replied_fid = message.reply_to_message.video.file_id
+        target = db.get_render_by_file_id(chat_id, replied_fid) or db.get_last_render(chat_id)
+        if target and target.get("code"):
+            original_prompt = target.get("prompt", "")
+            last_code = target.get("code", "")
             await _safe_reply(message, f"✏️ Editing animation: _\"{original_prompt[:60]}...\"_\n\nApplying: _\"{text[:80]}\"_")
             # Edit-by-diff: start from the prior code and apply only the change,
             # preserving the animation the user already liked.

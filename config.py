@@ -87,6 +87,17 @@ VISUAL_CRITIC_KEYFRAMES = _getint("VISUAL_CRITIC_KEYFRAMES", 4)
 # Which provider scores rendered frames: "qwen" (default) or "claude".
 VISION_PROVIDER = _get("VISION_PROVIDER", "qwen").lower()
 
+# ── Cloud render farm (free GitHub Actions worker) ───────────────────────────
+# Heavy/HD/best-of-N renders are dispatched to a GitHub Actions workflow on a
+# (ideally public, for 16 GB/unlimited runners) worker repo, keeping the bot's
+# own source private. Disabled until a worker repo + workflow are set up.
+CLOUD_RENDER_ENABLED = _getbool("CLOUD_RENDER_ENABLED", False)
+CLOUD_RENDER_REPO = _get("CLOUD_RENDER_REPO", "")          # e.g. "gopheriv/manim-render-worker"
+CLOUD_RENDER_WORKFLOW = _get("CLOUD_RENDER_WORKFLOW", "render.yml")
+CLOUD_RENDER_BRANCH = _get("CLOUD_RENDER_BRANCH", "main")
+CLOUD_RENDER_TIMEOUT = _getint("CLOUD_RENDER_TIMEOUT", 1200)  # seconds to await a cloud job
+CLOUD_RENDER_POLL = _getint("CLOUD_RENDER_POLL", 10)         # seconds between status polls
+
 # ── Queue / Concurrency ─────────────────────────────────────────────────────
 MAX_CONCURRENT_RENDERS = _getint("MAX_CONCURRENT_RENDERS", 1)  # 1 on i5/8GB RAM
 

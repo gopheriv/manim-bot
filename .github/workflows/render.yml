@@ -1,0 +1,63 @@
+name: render
+run-name: render ${{ inputs.job_id }}
+
+# Free cloud Manim render worker. Dispatched by the bot's cloud_render.py.
+# On a PUBLIC repo this runs on a 4 vCPU / 16 GB runner with unlimited minutes —
+# enough for 1080p, Surfaces/3D and parallel best-of-N drafts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      code_gz:
+        description: "gzip+base64 of the Manim scene code"
+        required: true
+      quality:
+        description: "Manim quality flag (-ql/-qm/-qh/-qk)"
+        required: false
+        default: "-qh"
+      fps:
+        description: "frames per second"
+        required: false
+        default: "60"
+      job_id:
+        description: "unique id (also the artifact suffix)"
+        required: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System deps (LaTeX, cairo, pango, ffmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libcairo2-dev libpango1.0-dev pkg-config \
+            texlive texlive-latex-extra texlive-fonts-extra texlive-science \
+            dvisvgm dvipng
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Manim
+        run: pip install "manim>=0.18,<0.21" numpy
+
+      - name: Render
+        env:
+          CODE_GZ: ${{ inputs.code_gz }}
+          QUALITY: ${{ inputs.quality }}
+          FPS: ${{ inputs.fps }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: python deploy/ci_render.py
+
+      - name: Upload video
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-${{ inputs.job_id }}
+          path: out/render.mp4
+          if-no-files-found: error
+          retention-days: 1

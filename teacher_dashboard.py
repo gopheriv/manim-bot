@@ -96,7 +96,7 @@ def get_engagement_stats(chat_id: int) -> dict:
     cid = str(chat_id)
 
     if cid not in data["classes"]:
-        return {"students": 0, "views": 0, "engagement_rate": 0}
+        return {"students": 0, "total_views": 0, "avg_views_per_student": 0, "engagement_rate": 0}
 
     teacher = data["classes"][cid]
     students = len(teacher["students"])

@@ -5,6 +5,11 @@
     "voiceover_enabled": true,
     "quality": "-ql"
   },
+  "999002": {
+    "quality": "-l",
+    "voiceover_enabled": false,
+    "provider": "qwen"
+  },
   "999001": {
     "theme": "nord"
   }

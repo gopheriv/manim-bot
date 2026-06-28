@@ -176,6 +176,43 @@ class Database:
         finally:
             conn.close()
     
+    def get_render_by_file_id(self, chat_id: int, video_file_id: str) -> Optional[dict]:
+        """Get the render whose result video matches a given telegram file_id.
+
+        Lets 'reply to a video and edit it' target the EXACT video replied to,
+        rather than always the user's most recent render.
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT task_id, prompt, is_3d, quality, theme, code,
+                       video_path, video_file_id, created_at, completed_at
+                FROM render_history
+                WHERE chat_id = ? AND video_file_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (chat_id, video_file_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "task_id": row[0],
+                "prompt": row[1],
+                "is_3d": bool(row[2]),
+                "quality": row[3],
+                "theme": row[4],
+                "code": row[5],
+                "video_path": row[6],
+                "video_file_id": row[7],
+                "created_at": row[8],
+                "completed_at": row[9],
+            }
+        finally:
+            conn.close()
+
     def get_render_by_task_id(self, task_id: str) -> Optional[dict]:
         """Get render by task ID."""
         conn = self._get_conn()
