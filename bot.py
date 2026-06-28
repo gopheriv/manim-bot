@@ -899,24 +899,44 @@ async def _send_animation(
 
             # Deterministic fallback: never fail a user request just because generated code is brittle.
             if video_path is None:
-                error_detail = render._last_error or "Unknown error"
+                error_detail = last_render_error or render._last_error or "Unknown error"
                 logger.warning("LLM render failed after repair; using deterministic fallback. Last error: %s", error_detail[:700])
-                await _safe_reply(message, "🛟 Generated code was unstable, rendering a safe fallback animation instead…")
+                await _safe_edit(status_msg, "🛟 Generated code was unstable, rendering a safe fallback animation instead…")
                 fallback_code = build_fallback_scene(prompt, bg_color=theme.bg_color)
-                video_path = await render(
-                    fallback_code, chat_id, timeout=min(MANIM_TIMEOUT, 180), quality="-ql",
-                    tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
-                    progress_cb=_on_manim_progress,
-                )
-                if video_path:
-                    code = fallback_code
+
+                if cloud_available():
+                    # Cloud fallback
+                    await _safe_edit(status_msg, "☁️ Rendering fallback animation in cloud…")
+                    video_path = await cloud_render.cloud_render(
+                        fallback_code,
+                        quality=get_cloud_quality(),
+                        fps=get_cloud_fps(),
+                        dest_dir=Path("tmp/cloud") / str(chat_id),
+                    )
+                    if video_path and video_path.exists():
+                        code = fallback_code
+                        logger.info("Cloud fallback render succeeded: %s", video_path)
+                    else:
+                        cloud_err = cloud_render.cloud_render_last_error
+                        logger.warning("Cloud fallback failed: %s", cloud_err)
+                        video_path = None
                 else:
+                    # Local fallback
+                    video_path = await render(
+                        fallback_code, chat_id, timeout=min(MANIM_TIMEOUT, 180), quality="-ql",
+                        tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                        progress_cb=_on_manim_progress,
+                    )
+                    if video_path:
+                        code = fallback_code
+
+                if video_path is None:
                     if task.is_cancelled():
                         task.status = TaskStatus.CANCELLED
                         task.completed_at = datetime.now()
                         await _safe_reply(message, "❌ Render cancelled.")
                         return
-                    error_display = (render._last_error or error_detail or "Unknown error")[:500]
+                    error_display = (last_render_error or render._last_error or error_detail or "Unknown error")[:500]
                     task.status = TaskStatus.FAILED
                     task.error_message = error_display
                     task.completed_at = datetime.now()
@@ -963,17 +983,33 @@ async def _send_animation(
                     if "class GenScene" not in improved or "def construct" not in improved:
                         logger.warning("Visual-critic repair invalid structure; keeping current render")
                         break
-                    new_video = await render(
-                        improved, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
-                        tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
-                        progress_cb=_on_manim_progress,
-                    )
-                    if new_video:
-                        video_path, code = new_video, improved
-                        logger.info("Visual-critic re-render succeeded (pass %d)", vpass + 1)
+
+                    # Re-render using cloud or local
+                    if cloud_available():
+                        new_video = await cloud_render.cloud_render(
+                            improved,
+                            quality=get_cloud_quality(),
+                            fps=get_cloud_fps(),
+                            dest_dir=Path("tmp/cloud") / str(chat_id),
+                        )
+                        if new_video and new_video.exists():
+                            video_path, code = new_video, improved
+                            logger.info("Visual-critic cloud re-render succeeded (pass %d)", vpass + 1)
+                        else:
+                            logger.warning("Visual-critic cloud re-render failed; keeping previous render")
+                            break
                     else:
-                        logger.warning("Visual-critic re-render failed; keeping previous render")
-                        break
+                        new_video = await render(
+                            improved, chat_id, timeout=MANIM_TIMEOUT, quality=user_quality,
+                            tiktok_mode=tiktok_mode, cancel_event=task.cancel_event,
+                            progress_cb=_on_manim_progress,
+                        )
+                        if new_video:
+                            video_path, code = new_video, improved
+                            logger.info("Visual-critic re-render succeeded (pass %d)", vpass + 1)
+                        else:
+                            logger.warning("Visual-critic re-render failed; keeping previous render")
+                            break
 
             # Record render success
             render_time = (datetime.now() - render_start).total_seconds()
