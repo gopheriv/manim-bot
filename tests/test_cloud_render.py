@@ -39,6 +39,13 @@ class FakeGh:
     async def __call__(self, *args, timeout=60):
         self.calls.append(args)
         a = list(args)
+        if a[0] == "api":
+            # ensure_worker_current: GET returns our local copy (already in sync,
+            # so no push); PUT (if ever reached) just succeeds.
+            if "-X" in a and a[a.index("-X") + 1] == "PUT":
+                return 0, json.dumps({"commit": {"sha": "deadbeef"}}), ""
+            content = base64.b64encode(cr._LOCAL_CI_RENDER.read_bytes()).decode("ascii")
+            return 0, json.dumps({"content": content, "sha": "remote-sha"}), ""
         if a[:2] == ["workflow", "run"]:
             return 0, "", ""
         if a[:2] == ["run", "list"]:
@@ -62,6 +69,7 @@ def _cfg(monkeypatch):
     monkeypatch.setattr(cr, "CLOUD_RENDER_REPO", "owner/worker")
     monkeypatch.setattr(cr, "CLOUD_RENDER_POLL", 0)
     monkeypatch.setattr(cr, "CLOUD_RENDER_TIMEOUT", 5)
+    monkeypatch.setattr(cr, "_worker_synced", False)  # reset per-process sync cache
 
 
 def test_dispatch_requires_repo(monkeypatch):
@@ -78,7 +86,9 @@ def test_dispatch_success(monkeypatch):
         "from manim import *\nclass GenScene(Scene):\n def construct(self):pass",
         quality="-qh", fps=60, job_id="j2"))
     assert jid == "j2"
-    assert fake.calls[0][:2] == ("workflow", "run")
+    # Worker sync runs first, then the dispatch.
+    assert fake.calls[0][0] == "api"
+    assert any(c[:2] == ("workflow", "run") for c in fake.calls)
 
 
 def test_full_cloud_render(monkeypatch):
@@ -105,6 +115,66 @@ def test_failed_conclusion(monkeypatch):
         assert "failure" in cr.cloud_render_last_error
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+class SyncGh:
+    """Async `gh` stand-in that records PUTs and serves a configurable GET."""
+    def __init__(self, get_rc=0, get_content=None, get_sha="remote-sha"):
+        self.get_rc = get_rc
+        self.get_content = get_content
+        self.get_sha = get_sha
+        self.puts = []
+
+    async def __call__(self, *args, timeout=60):
+        a = list(args)
+        if a[0] == "api" and "-X" in a and a[a.index("-X") + 1] == "PUT":
+            self.puts.append(a)
+            return 0, json.dumps({"commit": {"sha": "newsha"}}), ""
+        if a[0] == "api":  # GET contents
+            if self.get_rc != 0:
+                return self.get_rc, "", "Not Found"
+            body = {"sha": self.get_sha}
+            if self.get_content is not None:
+                body["content"] = base64.b64encode(self.get_content).decode("ascii")
+            return 0, json.dumps(body), ""
+        return 0, "", ""
+
+
+def test_ensure_worker_current_noop_when_in_sync(monkeypatch):
+    _cfg(monkeypatch)
+    fake = SyncGh(get_content=cr._LOCAL_CI_RENDER.read_bytes())
+    monkeypatch.setattr(cr, "_gh", fake)
+    assert run(cr.ensure_worker_current()) is True
+    assert fake.puts == []  # identical content → no push
+
+
+def test_ensure_worker_current_pushes_on_drift(monkeypatch):
+    _cfg(monkeypatch)
+    fake = SyncGh(get_content=b"# stale worker copy\n")
+    monkeypatch.setattr(cr, "_gh", fake)
+    assert run(cr.ensure_worker_current()) is True
+    assert len(fake.puts) == 1
+    assert "sha=remote-sha" in fake.puts[0]  # update carries the blob sha
+
+
+def test_ensure_worker_current_creates_when_missing(monkeypatch):
+    _cfg(monkeypatch)
+    fake = SyncGh(get_rc=1)  # 404 → file absent on worker
+    monkeypatch.setattr(cr, "_gh", fake)
+    assert run(cr.ensure_worker_current()) is True
+    assert len(fake.puts) == 1
+    assert not any(x.startswith("sha=") for x in fake.puts[0])  # create, no sha
+
+
+def test_ensure_worker_current_cached(monkeypatch):
+    _cfg(monkeypatch)
+    fake = SyncGh(get_content=cr._LOCAL_CI_RENDER.read_bytes())
+    monkeypatch.setattr(cr, "_gh", fake)
+    assert run(cr.ensure_worker_current()) is True
+    fake2 = SyncGh(get_content=b"different")
+    monkeypatch.setattr(cr, "_gh", fake2)
+    assert run(cr.ensure_worker_current()) is True  # cached → skips re-check
+    assert fake2.puts == []
 
 
 def test_find_run_id(monkeypatch):

@@ -31,6 +31,13 @@ logger = logging.getLogger("cloud_render")
 # Last error (parallels renderer.render._last_error for uniform error surfacing)
 cloud_render_last_error = ""
 
+# The render harness lives here AND in the public worker repo (which can't read
+# this private repo at run time). `ensure_worker_current` keeps the worker copy
+# in lock-step so it can never silently go stale. Checked once per process.
+CI_RENDER_PATH = "deploy/ci_render.py"
+_LOCAL_CI_RENDER = Path(__file__).parent / "deploy" / "ci_render.py"
+_worker_synced = False
+
 
 def _set_error(msg: str) -> None:
     global cloud_render_last_error
@@ -73,6 +80,60 @@ def new_job_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+async def ensure_worker_current(repo: str | None = None, force: bool = False) -> bool:
+    """Push our local ci_render.py to the worker repo if it has drifted.
+
+    The worker is a *separate public* repo with its own copy of the render
+    harness; when that copy lags behind this one, renders fail in confusing
+    ways (e.g. searching for the wrong output filename). Before dispatching we
+    compare the worker's copy against ours and push if they differ — making
+    this repo the single source of truth without storing any token in the
+    public repo.
+
+    Best-effort and cached per process: a check/push failure is logged but does
+    not block the render (a truly stale worker will still surface a clear error
+    from the render itself). Returns True if the worker is known-current.
+    """
+    global _worker_synced
+    if _worker_synced and not force:
+        return True
+    repo = repo or CLOUD_RENDER_REPO
+    if not repo:
+        return False
+    try:
+        local = _LOCAL_CI_RENDER.read_bytes()
+    except OSError as e:  # noqa: BLE001
+        logger.warning("worker sync: cannot read %s: %s", _LOCAL_CI_RENDER, e)
+        return False
+
+    remote_sha: str | None = None
+    rc, out, _ = await _gh("api", f"repos/{repo}/contents/{CI_RENDER_PATH}")
+    if rc == 0:
+        try:
+            meta = json.loads(out or "{}")
+            remote_sha = meta.get("sha")
+            remote = base64.b64decode((meta.get("content") or "").replace("\n", ""))
+            if remote == local:
+                _worker_synced = True
+                return True  # already in sync — no push needed
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass  # unparseable → fall through and overwrite
+    # rc != 0 usually means 404 (file absent) → create it below.
+
+    put = ["api", "-X", "PUT", f"repos/{repo}/contents/{CI_RENDER_PATH}",
+           "-f", "message=chore: sync ci_render.py from manim-bot (auto)",
+           "-f", f"content={base64.b64encode(local).decode('ascii')}"]
+    if remote_sha:
+        put += ["-f", f"sha={remote_sha}"]
+    rc, out, err = await _gh(*put)
+    if rc != 0:
+        logger.warning("worker sync push failed (rc=%s): %s", rc, (err or out).strip())
+        return False
+    logger.info("Synced ci_render.py to worker %s", repo)
+    _worker_synced = True
+    return True
+
+
 async def dispatch_render(
     code: str,
     quality: str = "-qh",
@@ -86,6 +147,9 @@ async def dispatch_render(
         _set_error("CLOUD_RENDER_REPO is not configured")
         return None
     job_id = job_id or new_job_id()
+    # Keep the worker's render harness in lock-step before dispatching. Best
+    # effort: never blocks a render, just prevents the silent-drift failure.
+    await ensure_worker_current(repo)
     rc, out, err = await _gh(
         "workflow", "run", CLOUD_RENDER_WORKFLOW,
         "--repo", repo, "--ref", CLOUD_RENDER_BRANCH,
