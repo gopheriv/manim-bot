@@ -156,17 +156,24 @@ class RenderQueue:
         for task_id in to_remove:
             del self.tasks[task_id]
 
-        # Drain stale task IDs from the queue that no longer exist in self.tasks
+        # Drain stale task IDs from the queue that no longer exist in self.tasks.
+        # Pull EVERYTHING out first, then re-queue only the survivors. Re-queuing
+        # into the same queue while still draining it loops forever the moment a
+        # still-valid ID is present — get_nowait removes one and put_nowait adds
+        # one back, so queue.empty() never becomes true (event-loop hang).
         drained = 0
-        while not self.queue.empty():
+        survivors: list[str] = []
+        while True:
             try:
                 task_id = self.queue.get_nowait()
-                if task_id in self.tasks:
-                    self.queue.put_nowait(task_id)  # Re-queue valid task
-                else:
-                    drained += 1  # Skip deleted task
-            except Exception:
+            except asyncio.QueueEmpty:
                 break
+            if task_id in self.tasks:
+                survivors.append(task_id)  # keep valid task (FIFO preserved)
+            else:
+                drained += 1  # drop deleted task
+        for task_id in survivors:
+            self.queue.put_nowait(task_id)
         if drained:
             logger.info(f"Drained {drained} stale IDs from queue during cleanup")
 

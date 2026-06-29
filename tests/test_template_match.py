@@ -4,8 +4,6 @@ Guards the strength-based match_score: a template should fire only on a
 specific phrase or two keyword words — never on a single generic word, which
 must fall through to the LLM path.
 """
-import pytest
-
 from templates.base import SceneTemplate, TemplateConfig
 from templates.registry import get_registry, TemplateRegistry
 
