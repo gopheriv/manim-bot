@@ -41,7 +41,7 @@ eigen_arrows = VGroup()
 eigen_labels = VGroup()
 for eigenval, eigenvec in eigen_pairs:
     vec_line = Arrow(ORIGIN, 2.5 * eigenvec[:2], buff=0, color="#10B981", stroke_width=3)
-    val_label = MathTex(f"\\lambda = {{eigenval:.2f}}", font_size=24, color="#10B981")
+    val_label = MathTex(rf"\\lambda = {{eigenval:.2f}}", font_size=24, color="#10B981")
     val_label.next_to(vec_line.get_end(), RIGHT + UP)
     eigen_arrows.add(vec_line)
     eigen_labels.add(val_label)

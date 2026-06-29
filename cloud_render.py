@@ -16,6 +16,7 @@ import gzip
 import json
 import logging
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -235,28 +236,47 @@ async def await_render(
 
 
 async def _download_artifact(run_id: int, job_id: str, dest_dir: Path, repo: str) -> Path | None:
-    # `gh run download` refuses to overwrite existing files. Callers reuse
-    # dest_dir (e.g. one dir per chat), so a second render's render.mp4 would
-    # collide with the first's and fail ("The file exists"). Download into a
-    # fresh per-job subdir — unique per render, so collisions are impossible.
-    job_dir = dest_dir / f"render-{job_id}"
-    if job_dir.exists():
+    # `gh run download` REFUSES to overwrite an existing file ("The file exists").
+    # The bulletproof cure: extract into a BRAND-NEW empty directory every time.
+    # An empty target makes that failure physically impossible — no matter what
+    # leftovers are on disk, whether the chat's dest_dir is reused, or whether an
+    # old bot process wrote render.mp4 straight into dest_dir.
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Self-clean the reused chat dir: drop prior per-job subdirs and any legacy
+    # top-level render.mp4 (the exact pre-fix file behind "The file exists"). The
+    # previous render's video is already uploaded by the time we download next.
+    for stale in dest_dir.glob("render-*"):
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+    (dest_dir / "render.mp4").unlink(missing_ok=True)
+
+    rc, err = 1, ""
+    for _attempt in range(2):
+        # tempfile.mkdtemp() creates a fresh, guaranteed-unique EMPTY directory.
+        job_dir = Path(tempfile.mkdtemp(prefix=f"render-{job_id}-", dir=dest_dir))
+        rc, out, err = await _gh(
+            "run", "download", str(run_id), "--repo", repo,
+            "-n", f"render-{job_id}", "-D", str(job_dir),
+            timeout=180,
+        )
+        if rc == 0:
+            mp4s = sorted(job_dir.rglob("*.mp4"), key=lambda p: p.stat().st_size, reverse=True)
+            if not mp4s:
+                _set_error("no .mp4 found in downloaded artifact")
+                return None
+            logger.info("Cloud render %s downloaded: %s", job_id, mp4s[0])
+            return mp4s[0]
+        # Should be impossible in a fresh empty dir; if gh still trips on an
+        # existing file, wipe and retry once in another fresh dir. Any other
+        # failure (network, auth, missing artifact) won't be helped by a retry.
         shutil.rmtree(job_dir, ignore_errors=True)
-    job_dir.mkdir(parents=True, exist_ok=True)
-    rc, out, err = await _gh(
-        "run", "download", str(run_id), "--repo", repo,
-        "-n", f"render-{job_id}", "-D", str(job_dir),
-        timeout=180,
-    )
-    if rc != 0:
-        _set_error(f"artifact download failed (rc={rc}): {err.strip()}")
-        return None
-    mp4s = sorted(job_dir.rglob("*.mp4"), key=lambda p: p.stat().st_size, reverse=True)
-    if not mp4s:
-        _set_error("no .mp4 found in downloaded artifact")
-        return None
-    logger.info("Cloud render %s downloaded: %s", job_id, mp4s[0])
-    return mp4s[0]
+        if "file exists" not in (err or "").lower():
+            break
+
+    _set_error(f"artifact download failed (rc={rc}): {err.strip()}")
+    return None
 
 
 async def cloud_render(

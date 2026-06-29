@@ -7,6 +7,7 @@ import gc
 import logging
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,13 +15,13 @@ from typing import Callable
 
 import psutil
 
-from config import MANIM_QUALITY
 from render_tier import Tier, get_tier
 
 logger = logging.getLogger(__name__)
 
 RENDER_TIMEOUT = 600  # 10 minutes
-RENDER_DIR = Path("C:/Users/sunak/AppData/Local/Temp/manim_render")
+# OS temp dir — portable across machines/users (was a hardcoded C:/Users/... path).
+RENDER_DIR = Path(tempfile.gettempdir()) / "manim_render"
 SCENE_DIR = RENDER_DIR
 RENDER_DIR.mkdir(parents=True, exist_ok=True)
 

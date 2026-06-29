@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,11 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    TEACHER_DATA_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Atomic write — prevents a mid-write crash from corrupting the file and
+    # wiping all classes/assignments (loader returns a default on parse error).
+    tmp = TEACHER_DATA_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(TEACHER_DATA_PATH)
 
 
 def register_teacher(chat_id: int, name: str = "") -> dict:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,12 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    REFERRAL_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Atomic write: a crash mid-write would otherwise corrupt the ledger, and
+    # _load() returns an empty default on corruption — silently wiping every
+    # user's bonus renders. Write to a temp file then atomically replace.
+    tmp = REFERRAL_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(REFERRAL_PATH)
 
 
 def generate_referral_code(chat_id: int) -> str:

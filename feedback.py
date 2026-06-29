@@ -21,7 +21,11 @@ def _load() -> list[dict]:
 
 
 def _save(data: list[dict]) -> None:
-    FEEDBACK_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Atomic write — a crash mid-write corrupts the file and _load() then
+    # returns [], silently dropping all feedback. Temp-then-replace avoids that.
+    tmp = FEEDBACK_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(FEEDBACK_FILE)
 
 
 def log_feedback(chat_id: int, prompt: str, task_id: str, rating: str) -> None:

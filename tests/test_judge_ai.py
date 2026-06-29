@@ -2,10 +2,9 @@
 import asyncio
 import json
 
-import pytest
 
 import judge_ai
-from judge_ai import JudgeVerdict, JudgeReview, judge_code, _parse_review, _resolve_provider
+from judge_ai import JudgeVerdict, judge_code, _parse_review, _resolve_provider
 
 
 # ── _parse_review ────────────────────────────────────────────────────────────

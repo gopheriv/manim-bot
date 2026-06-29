@@ -13,7 +13,7 @@ import psutil
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
 import d1
@@ -47,7 +47,7 @@ from rate_limiter import rate_limiter
 from renderer import render, cleanup, get_last_generated_code, classify_render_error
 from render_tier import get_tier, cloud_available, get_cloud_quality, get_cloud_fps
 import settings as user_settings
-from themes import get_theme, next_theme, build_theme_prompt, THEME_ORDER
+from themes import get_theme, next_theme, build_theme_prompt
 from voiceover import add_voiceover
 from templates import get_registry
 from tiktok_integration import detect_tiktok_mode
@@ -61,15 +61,14 @@ from judge_ai import judge_code, repair_by_judge, JudgeVerdict, JudgeReview
 from error_learner import log_error, get_adaptive_prompt_modifiers
 from edu_reviewer import review_education
 from course_generator import generate_course
-from exam_prep import get_question_bank, get_random_question, generate_animation_for_question
-from gallery import GALLERY_CATALOG, get_featured, get_by_category, get_by_id, search as gallery_search, increment_view, increment_render
+from exam_prep import get_random_question, generate_animation_for_question
+from gallery import get_featured, get_by_category, get_by_id, search as gallery_search, increment_view
 from multi_agent_debate import debate_generate
 from visual_critic import critique_render
-from referral import register_user, get_user_referral_info, get_referral_stats, use_bonus_render
+from referral import register_user, get_user_referral_info
 from teacher_dashboard import register_teacher, get_teacher_dashboard, get_engagement_stats, add_student
 
 # Ensure log directory exists before configuring handlers
-from pathlib import Path
 Path("logs").mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -84,6 +83,12 @@ logger = logging.getLogger("bot")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Module-level anchor for fire-and-forget background tasks (D1 cache saves, etc.).
+# The event loop only keeps weak refs to tasks, so a task referenced solely by a
+# function-local would be garbage-collected after that function returns. Keeping
+# the set at module scope guarantees these outlive the call that spawned them.
+_d1_tasks: set[asyncio.Task] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +440,12 @@ async def _send_animation(
 
                 # Slow path: full LLM code generation
                 format_label = "📱 TikTok (9:16)" if tiktok_mode else f"🎨 Theme: **{theme.name}**"
+                # Show cloud quality when cloud is available, otherwise local quality
+                display_quality = get_cloud_quality() if cloud_available() else user_quality
+                render_target = "☁️ cloud (1080p/60fps)" if cloud_available() else "💻 local"
                 await _safe_reply(message, (
                     f"🤖 Generating Manim code with **{GPT_MODEL}**…\n"
-                    f"{format_label} | Quality: `{user_quality}`"
+                    f"{format_label} | Quality: `{display_quality}` | Render: {render_target}"
                 ))
 
                 # Build theme/format-specific prompt
@@ -1095,7 +1103,6 @@ async def _send_animation(
             # Save to D1 cache (fire-and-forget with tracking).
             # Uses the same composite cache_key as the lookup; skipped for edits.
             if telegram_file_id and not skip_cache:
-                _d1_tasks: set[asyncio.Task] = set()
                 d1_task = asyncio.create_task(
                     d1.save_render(chat_id, cache_key, code, telegram_file_id)
                 )
@@ -1284,6 +1291,7 @@ async def cmd_start(message: types.Message) -> None:
         "• `/referral` → earn free renders by inviting friends\n"
         "• `/teacher` → educator analytics dashboard\n\n"
         "Try: *Animate why matrix multiplication is function composition*"
+        f"{bonus_msg}"
     ))
 
 
@@ -1411,7 +1419,7 @@ async def cmd_settings(message: types.Message) -> None:
         lines = [
             "⚙️ **Your Settings**\n",
             f"**Theme:** {theme.name}",
-            f"**Style:** visual intuition → transformation → insight → recap",
+            "**Style:** visual intuition → transformation → insight → recap",
             f"**Quality:** `{s.get('quality', MANIM_QUALITY)}`",
             f"**Chat LLM:** {provider_name}",
             f"**Voiceover:** {'✅ enabled' if s.get('voiceover_enabled') else '❌ disabled'}",
@@ -1500,7 +1508,7 @@ async def cmd_examples(message: types.Message) -> None:
         dim = "🎲" if ex.get("is_3d") else "📐"
         lines.append(f"  {i+1}. {dim} **{ex['name']}** — _{ex.get('description', '')}_")
 
-    lines.append(f"\n_Run `/example 1` or send me any prompt for a polished Visual Math render._")
+    lines.append("\n_Run `/example 1` or send me any prompt for a polished Visual Math render._")
     await _safe_reply(message, "\n".join(lines))
 
 
@@ -1584,7 +1592,7 @@ async def cmd_course(message: types.Message) -> None:
             level_emoji = "🟢" if lesson.level == "beginner" else "🟡" if lesson.level == "intermediate" else "🔴"
             lines.append(f"{i}. {level_emoji} **{lesson.title}** ({lesson.level})")
             lines.append(f"   _{', '.join(lesson.key_concepts[:3])}_")
-        lines.append(f"\nReply with a lesson number to generate that animation!")
+        lines.append("\nReply with a lesson number to generate that animation!")
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"Course generation failed: {e}")
@@ -1686,7 +1694,7 @@ async def cmd_gallery(message: types.Message) -> None:
         for item in items:
             diff = "⭐" * (item.difficulty // 2)
             lines.append(f"{item.id}. **{item.title}** {diff}")
-        lines.append(f"\nUse `/gallery <number>` to render an item")
+        lines.append("\nUse `/gallery <number>` to render an item")
         await _safe_reply(message, "\n".join(lines))
         return
 
@@ -1698,7 +1706,7 @@ async def cmd_gallery(message: types.Message) -> None:
             diff = "⭐" * (item.difficulty // 2)
             lines.append(f"{item.id}. **{item.title}** {diff}")
             lines.append(f"   _{item.category}_")
-        lines.append(f"\nUse `/gallery <number>` to render an item")
+        lines.append("\nUse `/gallery <number>` to render an item")
         await _safe_reply(message, "\n".join(lines))
         return
 
@@ -1728,12 +1736,12 @@ async def cmd_debate(message: types.Message) -> None:
         return
 
     # Show scores
-    score_text = f"⚔️ **Debate Results:**\n"
+    score_text = "⚔️ **Debate Results:**\n"
     if "winner" in scores:
         score_text += f"🏆 Agent {scores['winner']} won\n"
     if "agent_a" in scores and isinstance(scores["agent_a"], float):
         score_text += f"Agent A: {scores['agent_a']:.1f}/10 | Agent B: {scores['agent_b']:.1f}/10\n"
-    score_text += f"\n🎬 Rendering winner's code..."
+    score_text += "\n🎬 Rendering winner's code..."
     await _safe_reply(message, score_text)
 
     is_3d = any(w in prompt.lower() for w in ("3d", "three-dimensional"))
@@ -1844,6 +1852,12 @@ async def handle_webapp_data(message: types.Message) -> None:
         data = json.loads(message.web_app_data.data)
         chat_id = message.chat.id
 
+        # Reset button sends {"reset": true}
+        if data.get("reset"):
+            user_settings.reset(chat_id)
+            await _safe_reply(message, "🔄 Settings reset to defaults.")
+            return
+
         # Validate and sanitize settings
         valid_voices = {v[0] for v in user_settings.AVAILABLE_VOICES}
         valid_themes = {t[0] for t in user_settings.AVAILABLE_THEMES}
@@ -1883,6 +1897,14 @@ async def handle_webapp_data(message: types.Message) -> None:
             else:
                 logger.warning(f"WebApp: invalid theme '{theme}' from chat_id={chat_id}")
 
+        # Validate quality
+        if "quality" in data:
+            quality = data["quality"]
+            if quality in valid_qualities:
+                updates["quality"] = quality
+            else:
+                logger.warning(f"WebApp: invalid quality '{quality}' from chat_id={chat_id}")
+
         if updates:
             user_settings.set_many(chat_id, updates)
             await _safe_reply(message, f"✅ Settings updated: {', '.join(updates.keys())}")
@@ -1920,6 +1942,11 @@ async def handle_photo(message: types.Message) -> None:
             "and suggest an animation prompt. If no, just describe the image normally. "
             "Start your response with FORMULA: if it contains math, or CHAT: if not."
         )
+        if caption:
+            analysis_prompt += (
+                f'\n\nThe user sent this note with the image: "{caption}". '
+                "Take their instruction into account."
+            )
         response = await chat_with_image(image_data, analysis_prompt, provider=user_provider)
 
         # Step 2: Check if it's formula content

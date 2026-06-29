@@ -10,10 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from config import CHAT_MODEL, GPT_MODEL
+from config import GPT_MODEL
 from critic_agent import critique_code
-from llm import qwen_client, gpt_coding_client, strip_code_fences
-from prompt_builder import build_manim_system_prompt
+from llm import gpt_coding_client, strip_code_fences
 
 logger = logging.getLogger(__name__)
 
