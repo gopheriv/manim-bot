@@ -135,6 +135,13 @@ CRITIC_REPAIR_THRESHOLD = _getfloat("CRITIC_REPAIR_THRESHOLD", 6.0)
 # falls back to the lighter scene-layout plan and today's behavior.
 STORYBOARD_ENABLED = _getbool("STORYBOARD_ENABLED", True)
 
+# Visual Metaphor Library: a curated registry of teaching metaphors (function as a
+# machine, derivative as a sliding tangent, matrix as a warping grid…). When a
+# prompt matches, the director gets a menu to choose a spine metaphor and the code
+# generator gets a concrete, implementable Manim recipe for it. Graceful — no match
+# (or disabled) simply adds nothing and the pipeline behaves as before.
+VISUAL_METAPHORS_ENABLED = _getbool("VISUAL_METAPHORS_ENABLED", True)
+
 # Best-of-N tournament: generate N candidates, render drafts in parallel on the
 # cloud farm, vision-rank the ACTUAL frames, and keep the best. 1 = disabled
 # (single candidate, today's behavior). Only activates when the cloud farm is

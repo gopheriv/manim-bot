@@ -57,10 +57,32 @@ def test_parse_requires_load_bearing_beat_fields():
     assert parse_storyboard(json.dumps(bad)) is None
 
 
+def test_parse_coerces_quoted_duration_to_number():
+    # The LLM sometimes quotes the duration ("30"). Left as a string it would
+    # skip validation's isinstance check and crash the narration length budget
+    # (str > int). parse_storyboard must coerce it back to a number.
+    sb = _good_sb()
+    sb["duration_target_s"] = "24"
+    parsed = parse_storyboard(json.dumps(sb))
+    assert isinstance(parsed["duration_target_s"], (int, float))
+    assert parsed["duration_target_s"] == 24
+    # A non-numeric string is dropped rather than left to explode downstream.
+    sb["duration_target_s"] = "about half a minute"
+    parsed = parse_storyboard(json.dumps(sb))
+    assert "duration_target_s" not in parsed
+
+
 # ── validation as composition (non-fatal) ─────────────────────────────────────
 
 def test_clean_storyboard_has_no_issues():
     assert validate_storyboard(_good_sb()) == []
+
+
+def test_codegen_spec_forwards_per_beat_covers():
+    sb = _good_sb()
+    sb["beats"][0]["covers"] = ["definition", "intuition"]
+    spec = format_storyboard_for_codegen(sb)
+    assert "covers: definition, intuition" in spec
 
 
 def test_flags_too_few_beats():

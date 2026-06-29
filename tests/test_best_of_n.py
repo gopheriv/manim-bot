@@ -44,7 +44,7 @@ def test_tournament_picks_highest_score(monkeypatch):
     codes = [_good_code(i) for i in range(3)]
     scores = [5.0, 8.5, 6.0]  # candidate 1 wins
 
-    async def fake_gen(prompt, theme):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
         return codes.pop(0) if codes else ""
 
     async def fake_render(code, chat_id, idx, quality, fps):
@@ -67,7 +67,7 @@ def test_tournament_picks_highest_score(monkeypatch):
 def test_tournament_returns_none_when_all_gen_fail(monkeypatch):
     """If every candidate fails to generate, returns None."""
 
-    async def fake_gen(prompt, theme):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
         raise RuntimeError("LLM down")
 
     monkeypatch.setattr(best_of_n, "_gen_candidate", fake_gen)
@@ -80,7 +80,7 @@ def test_tournament_returns_unranked_when_all_renders_fail(monkeypatch):
     """If all drafts fail to render, returns the first valid candidate unranked."""
     codes = [_good_code(0), _good_code(1)]
 
-    async def fake_gen(prompt, theme):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
         return codes.pop(0) if codes else ""
 
     async def fake_render(code, chat_id, idx, quality, fps):
@@ -98,7 +98,7 @@ def test_tournament_handles_partial_gen_failure(monkeypatch):
     """Some candidates fail to generate; remaining are still rendered and judged."""
     call_count = 0
 
-    async def fake_gen(prompt, theme):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
         nonlocal call_count
         call_count += 1
         if call_count == 2:
@@ -125,7 +125,7 @@ def test_tournament_handles_scoring_failure(monkeypatch):
     codes = [_good_code(0), _good_code(1)]
     scores = [8.0, None]  # second score raises
 
-    async def fake_gen(prompt, theme):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
         return codes.pop(0) if codes else ""
 
     async def fake_render(code, chat_id, idx, quality, fps):
@@ -151,7 +151,7 @@ def test_n_clamped_to_minimum_2(monkeypatch):
     """n=1 is clamped to 2 (a tournament needs at least 2 candidates)."""
     gen_calls = 0
 
-    async def fake_gen(prompt, theme):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
         nonlocal gen_calls
         gen_calls += 1
         return _good_code(gen_calls)
@@ -171,11 +171,58 @@ def test_n_clamped_to_minimum_2(monkeypatch):
     assert gen_calls == 2  # clamped from 1 to 2
 
 
+def test_gen_candidate_forwards_metaphors(monkeypatch):
+    """_gen_candidate routes the menu to the director and the recipes to code-gen."""
+    captured = {}
+
+    async def fake_storyboard(prompt, metaphor_menu="", **kw):
+        captured["menu"] = metaphor_menu
+        return "{}"
+
+    async def fake_codegen(prompt, theme_instructions="", storyboard="", metaphor_recipes="", **kw):
+        captured["recipes"] = metaphor_recipes
+        return _good_code(0)
+
+    monkeypatch.setattr(best_of_n, "generate_storyboard", fake_storyboard)
+    monkeypatch.setattr(best_of_n, "generate_manim_code", fake_codegen)
+    monkeypatch.setattr(best_of_n, "parse_storyboard", lambda raw: {"beats": [{}]})
+    monkeypatch.setattr(best_of_n, "format_storyboard_for_codegen", lambda sb: "SB")
+    monkeypatch.setattr(best_of_n, "strip_code_fences", lambda c: c)
+
+    code = run(best_of_n._gen_candidate("p", "theme", metaphor_menu="MENU", metaphor_recipes="RECIPES"))
+    assert captured["menu"] == "MENU"
+    assert captured["recipes"] == "RECIPES"
+    assert "GenScene" in code
+
+
+def test_select_best_code_forwards_metaphors_to_every_candidate(monkeypatch):
+    """The tournament shares one menu/recipe set across all N candidates."""
+    seen = []
+
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+        seen.append((metaphor_menu, metaphor_recipes))
+        return _good_code(len(seen))
+
+    async def fake_render(code, chat_id, idx, quality, fps):
+        return Path(f"tmp/draft_{idx}.mp4")
+
+    async def fake_score(video, prompt, code):
+        return 5.0
+
+    monkeypatch.setattr(best_of_n, "_gen_candidate", fake_gen)
+    monkeypatch.setattr(best_of_n, "_render_draft", fake_render)
+    monkeypatch.setattr(best_of_n, "_score", fake_score)
+
+    run(best_of_n.select_best_code("p", "theme", n=3, chat_id=1, metaphor_menu="M", metaphor_recipes="R"))
+    assert len(seen) == 3
+    assert all(mm == "M" and mr == "R" for mm, mr in seen)
+
+
 def test_invalid_code_filtered_from_candidates(monkeypatch):
     """Candidates that don't have GenScene/construct are filtered out before rendering."""
     responses = [_good_code(0), "print('hello')", _good_code(2)]
 
-    async def fake_gen(prompt, theme):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
         return responses.pop(0) if responses else ""
 
     render_calls = []

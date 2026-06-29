@@ -405,9 +405,12 @@ def build_complexity_modifier(prompt: str, tier: Tier | None = None) -> str:
             return "## Multi-concept scene\nUp to 3 layers, 20-25 seconds. Still respect ALL hardware limits."
         return ""
     # Capable tiers — scale ambition (length + coverage) with complexity.
+    # SIMPLE and MEDIUM share the "standard" depth (see recommend_depth), so their
+    # length bands MUST match — otherwise this footer (~5 beats) would contradict
+    # the authoritative storyboard (6-9 beats) inside the very same code-gen prompt.
     if level == "SIMPLE":
-        return ("## Simple concept\nKeep it focused (~30-45s, ~5 beats), beautifully composed "
-                "and polished — but still cover the idea properly: definition, intuition, a quick example.")
+        return ("## Simple concept\nKeep it focused but teach it fully (~40-60s, 6-9 beats), "
+                "beautifully composed and polished: definition, intuition, a worked example, and a recap.")
     elif level == "MEDIUM":
         return ("## Develop it\n~45-60s, 6-9 beats. Cover the key sub-points, not just the headline: "
                 "definition, intuition, a worked example, and a recap.")
@@ -471,12 +474,15 @@ def build_manim_system_prompt(
     scene_plan: str = "",
     tier: Tier | None = None,
     storyboard: str = "",
+    metaphor_recipes: str = "",
 ) -> str:
     """Build the tier-aware system prompt for code generation.
 
     When a ``storyboard`` (cinematography IR) is supplied it is the AUTHORITATIVE
     plan the generator must implement beat-by-beat; the lighter ``scene_plan``
     layout is only used as a fallback when there is no storyboard.
+    ``metaphor_recipes`` (from ``visual_metaphors.format_metaphors_for_codegen``)
+    supplies concrete Manim CE patterns for the storyboard's chosen metaphor.
     """
     tier = tier or get_tier()
     sections = [BASE_MANIM_RULES]
@@ -490,6 +496,9 @@ def build_manim_system_prompt(
         sections.append(storyboard)
     elif scene_plan:
         sections.append(f"## Scene Layout\n{scene_plan}")
+    # Concrete recipes for the metaphor the plan committed to (implementable idioms).
+    if metaphor_recipes:
+        sections.append(metaphor_recipes)
     if theme_instructions:
         sections.append(theme_instructions)
     return "\n\n".join(sections)

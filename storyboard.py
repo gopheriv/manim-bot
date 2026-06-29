@@ -79,12 +79,15 @@ def build_storyboard_prompt(
     lessons: list[str] | None = None,
     hard_constraints: list[str] | None = None,
     depth: str = "standard",
+    metaphor_menu: str = "",
 ) -> str:
     """Build the director system prompt, optionally seeded with learned lessons.
 
     ``depth`` (``compact`` | ``standard`` | ``deep``, from ``recommend_depth``)
     selects the length/coverage bands — beat count, duration, and number of
     key points — so longer, denser films are requested for richer topics.
+    ``metaphor_menu`` (from ``visual_metaphors.format_metaphors_for_director``)
+    offers curated teaching metaphors for the director to pick a spine from.
     ``lessons`` are recurring Judge-rejection defects injected at the PLANNING
     stage (so the director designs around them, instead of them being buried in a
     code-gen footer). ``hard_constraints`` are lessons that have recurred enough
@@ -102,6 +105,10 @@ def build_storyboard_prompt(
         "→ recap), and design the beats so they collectively realize EVERY one. "
         "Don't stop at the headline idea — teach the whole topic at this depth."
     )
+
+    # Teaching-metaphor palette — a spine for the explainer (chosen by the director).
+    if metaphor_menu:
+        sections.append(metaphor_menu)
 
     if hard_constraints:
         rules = "\n".join(f"- {c}" for c in hard_constraints)
@@ -147,6 +154,16 @@ def parse_storyboard(raw: str) -> dict[str, Any] | None:
         if missing:
             logger.warning("Storyboard beat %d missing fields: %s", i, missing)
             return None
+
+    # Coerce duration_target_s to a number: the LLM sometimes quotes it
+    # ("30"), which would skip validation's isinstance check and raise a
+    # TypeError in the downstream narration length budget (str > int).
+    dt = sb.get("duration_target_s")
+    if isinstance(dt, str):
+        try:
+            sb["duration_target_s"] = float(dt) if "." in dt else int(dt)
+        except ValueError:
+            sb.pop("duration_target_s", None)
 
     return sb
 
@@ -261,6 +278,11 @@ def format_storyboard_for_codegen(sb: dict[str, Any]) -> str:
             lines.append(f"  camera: {b['camera']}")
         if b.get("emphasis"):
             lines.append(f"  emphasis: {b['emphasis']}")
+        covers = b.get("covers")
+        if covers:
+            # Which top-level key_point(s) this beat realizes — forward the
+            # director's coverage map so the generator teaches every sub-idea.
+            lines.append(f"  covers: {', '.join(map(str, covers)) if isinstance(covers, list) else covers}")
         if b.get("narration"):
             lines.append(f"  narration: \"{b['narration']}\"")
         lines.append("")

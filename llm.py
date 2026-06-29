@@ -191,11 +191,11 @@ async def _codegen_complete(messages: list[dict], max_tokens: int | None = None,
 
 # ── Manim code generation (GPT-5.5) ─────────────────────────────────────────
 
-async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "", storyboard: str = "") -> str:
+async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "", storyboard: str = "", metaphor_recipes: str = "") -> str:
     """Generate Manim animation code (Qwen 3.7 Max, reasoning ON, large output)."""
     try:
         messages = [
-            {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan, storyboard=storyboard)},
+            {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan, storyboard=storyboard, metaphor_recipes=metaphor_recipes)},
             {"role": "user", "content": prompt},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
@@ -369,18 +369,20 @@ async def generate_storyboard(
     lessons: list[str] | None = None,
     hard_constraints: list[str] | None = None,
     depth: str = "standard",
+    metaphor_menu: str = "",
 ) -> str:
     """Generate a cinematography storyboard (JSON IR) for a request.
 
     Uses the reasoning-on code-gen path: temporal/spatial/narrative planning is
     exactly where chain-of-thought helps. Returns raw JSON text (caller parses).
     ``depth`` ('compact'|'standard'|'deep') sets the length/coverage bands.
-    Recurring Judge lessons (and hard constraints) are injected into the director
-    system prompt so defects are designed out at the planning stage.
+    ``metaphor_menu`` offers curated teaching metaphors for the director to pick a
+    spine from. Recurring Judge lessons (and hard constraints) are injected into
+    the director system prompt so defects are designed out at the planning stage.
     """
     try:
         messages = [
-            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints, depth=depth)},
+            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints, depth=depth, metaphor_menu=metaphor_menu)},
             {"role": "user", "content": f"Storyboard this animation request: {prompt}"},
         ]
         # Reuse the thinking-on completion (with non-thinking fallback) — the

@@ -114,14 +114,26 @@ def test_depth_capable_complex_is_deep():
 
 
 def test_capable_complexity_modifier_scales_length():
-    # Capable-tier durations grew: simple ~30-45s, medium ~45-60s, complex ~60-90s.
-    assert "30-45" in build_complexity_modifier("draw a circle", CLOUD_CINEMATIC)
+    # Capable-tier length policy has TWO buckets (see recommend_depth): SIMPLE and
+    # MEDIUM share the "standard" band (~40-60s, 6-9 beats), COMPLEX is "deep"
+    # (~60-90s). SIMPLE must NOT advertise a shorter band than the storyboard it
+    # accompanies, or the two directives contradict inside one code-gen prompt.
+    assert "40-60" in build_complexity_modifier("draw a circle", CLOUD_CINEMATIC)
     assert "45-60" in build_complexity_modifier(
         "animate the probability distribution of a coin flip", CLOUD_CINEMATIC
     )
     assert "60-90" in build_complexity_modifier(
         "derive and prove the fourier series step by step with a worked example", CLOUD_CINEMATIC
     )
+
+
+def test_simple_band_does_not_undercut_standard_depth():
+    # Regression: capable SIMPLE → recommend_depth "standard" (6-9 beats), so the
+    # code-gen footer must not ask for fewer beats than the storyboard plans.
+    assert recommend_depth("draw a circle", CLOUD_CINEMATIC) == "standard"
+    modifier = build_complexity_modifier("draw a circle", CLOUD_CINEMATIC)
+    assert "6-9 beats" in modifier
+    assert "~5 beats" not in modifier
 
 
 if __name__ == "__main__":
