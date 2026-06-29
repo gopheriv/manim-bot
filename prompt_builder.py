@@ -9,16 +9,21 @@ The budget is a *tier*, not a global law.
 
 from __future__ import annotations
 
+import re
+
 from render_tier import Tier, get_tier
 
 
 # Detect the installed Manim version once so prompts can pin the API surface the
 # model must target (prevents fixes from reintroducing removed/renamed APIs).
+# Fallback is "0.19+" (a real, comparable floor) only when the import fails —
+# the live version is preferred whenever Manim is importable.
+_MANIM_VERSION_FALLBACK = "0.19+"
 try:
     import manim as _manim
-    MANIM_VERSION = getattr(_manim, "__version__", "0.20.x")
+    MANIM_VERSION = getattr(_manim, "__version__", _MANIM_VERSION_FALLBACK)
 except Exception:
-    MANIM_VERSION = "0.20.x"
+    MANIM_VERSION = _MANIM_VERSION_FALLBACK
 
 
 # ── Core rules ────────────────────────────────────────────────────────────────
@@ -51,6 +56,17 @@ Output ONLY Python code. No explanation, no markdown fences.
 - Use Python builtins: `float`, `int`, `bool`, `str`
 - Use `np.float64`, `np.int64` for typed numpy scalars
 
+## MANIM COLOR API (CRITICAL — causes runtime AttributeError)
+- `interpolate_color()`, `color_gradient()`, `average_color()`, and similar color
+  functions require **ManimColor objects**, NOT bare hex strings.
+- WRONG: `COOL = "#3498db"` then `interpolate_color(COOL, WARM, alpha)` → crashes with
+  `'str' object has no attribute 'interpolate'`.
+- CORRECT: `COOL = ManimColor("#3498db")` (or use built-ins: `BLUE`, `RED`, `TEAL`, etc.)
+- When building color stops / gradient palettes as lists, wrap every entry:
+  `color_stops = [ManimColor(c) for c in ["#hex1", "#hex2", "#hex3"]]`.
+- `set_color("#hex")` and `fill_color="#hex"` accept strings — ONLY `interpolate_color`
+  and friends need ManimColor. When in doubt, wrap with `ManimColor()`.
+
 ## VISUAL POLISH — avoid these specific defects (they look like bugs)
 - **Boxes must not clip their contents**: any `SurroundingRectangle`/`BackgroundRectangle`
   needs `buff>=0.15`; the box edge must never touch or cross the text/glyphs inside it.
@@ -71,6 +87,23 @@ Output ONLY Python code. No explanation, no markdown fences.
   on top of text.
 - **Use the whole frame**: don't leave half the frame empty for more than ~2s — bring in
   the label/equation on the empty side early, or center the hero object.
+- **Iterative geometry: manage visual density**: when repeating an algorithm (chords,
+  polygons, subdivisions), NEVER keep all iterations visible at full opacity. After N≥4
+  iterations, fade older ones to opacity≤0.15 or remove them entirely. Alternatively,
+  zoom/scale the scene so the latest iteration occupies most of the frame. Distinct
+  high-contrast colors per iteration (not pastels that blend to grey).
+- **Text-before-geometry sync**: when a formula box or calculation panel appears, its
+  values must be highlighted/computed IN SYNC with the geometry action on screen. Never
+  show a fully populated formula box while the geometric element hasn't appeared yet.
+  Sequence: geometry draws → corresponding value appears in box → highlight both together.
+- **Algebra↔geometry connector**: every time you highlight a term in an equation that
+  corresponds to a geometric element, draw an animated connector (arrow, dashed line,
+  or moving dot) between them. Simultaneous appearance alone is not enough — the viewer
+  must SEE the link.
+- **Screen-budget rule**: the frame has ~4 zones (top, left, right, bottom). Never
+  activate a new zone while existing content hasn't been faded/moved away. When adding
+  bottom summary text, first fade the top hero element to make room. Never let text
+  overlap fading content — leave `buff>=0.3` between old and new.
 """
 
 # ── Style directives (concise) ────────────────────────────────────────────────
@@ -106,6 +139,11 @@ not just `FadeIn`. Beauty within the 3-layer budget — not minimalism for its o
 
 # ── HARDWARE BUDGET (the critical addition) ───────────────────────────────────
 
+# NOTE: This budget applies ONLY to the *constrained* tier (the 8 GB laptop).
+# Capable tiers use _cinematic_budget() instead, which deliberately RELAXES these
+# limits (e.g. Surfaces become allowed). The two are never combined, so the
+# "ParametricSurface forbidden here / allowed there" difference is by tier, not a
+# contradiction.
 HARDWARE_BUDGET = """## HARDWARE BUDGET (i5-1155G7, 8GB RAM — STRICT LIMITS)
 
 Your code runs on a laptop with 8GB RAM. Exceeding these limits crashes the render.
@@ -120,7 +158,7 @@ Your code runs on a laptop with 8GB RAM. Exceeding these limits crashes the rend
 | `TracedPath` | 6 each | max 1 |
 | `LaggedStart` with >10 items | 4 each | max 2 |
 | `Sphere`, `Cube`, 3D objects | 8 each | max 3 |
-| Scene > 200 frames | +1/frame | stay under 200 |
+| Long scenes | small cost/frame | keep tight; trim dead time |
 | `.copy()` for glow | 1 each | max 2 |
 | `Transform` between complex shapes | 3 each | max 3 |
 
@@ -249,7 +287,10 @@ scene — a concept keeps its color in equations, graphs, vectors and labels. De
 - blue = known / given          - red = contradiction / warning
 - yellow = current focus         - purple = auxiliary / construction
 - green = result / conclusion    - orange = transformation in progress
-Honor the active VISUAL THEME's palette when one is provided. Never colour at random.
+Stay within this palette plus neutrals (white/grey for axes, labels, structure). Do not
+introduce extra hues outside these roles — a limited, consistent palette reads as designed;
+a rainbow reads as noise. Honor the active VISUAL THEME's palette when one is provided.
+Never colour at random.
 """
 
 ANTI_LAZY_CINEMATIC = """## QUALITY FLOOR (cinematic)
@@ -305,10 +346,20 @@ FIX_INTRO = """Previous Manim script failed with this error:
 ```
 {error}
 ```
-Fix the bug. Keep the SAME visual concept.
-Do NOT add more objects, layers, or effects than the original.
-Simplify if needed to stay within hardware budget.
+Fix the bug. Keep the SAME visual concept and change as little as possible —
+repair the defect, don't redesign. {budget_note}
 """
+
+# Tier-specific tail for FIX_INTRO. On the constrained tier, trimming complexity
+# is a valid repair; on capable tiers it would wrongly contradict the cinematic
+# "several simultaneous layers" direction, so we tell it to PRESERVE the layers.
+_FIX_BUDGET_NOTE_CONSTRAINED = (
+    "Do not add objects/layers/effects beyond the original; simplify if needed to "
+    "stay within the hardware budget."
+)
+_FIX_BUDGET_NOTE_CAPABLE = (
+    "Preserve the original's layers and ambition — only fix what is broken."
+)
 
 LAYOUT_REPAIR_INTRO = """Layout validator found overlap/crowding:
 {issues}
@@ -317,15 +368,23 @@ Fix ONLY positions, spacing, and timing. Preserve the concept and colors.
 
 # ── Complexity assessment ────────────────────────────────────────────────────
 
+_COMPLEX_KEYWORDS = frozenset({
+    "compare", "relationship", "transform", "series", "matrix",
+    "surface", "fourier", "eigen", "convergence", "integral",
+    "derivative", "graph", "tangent", "slope", "gradient",
+})
+
+
 def _assess_complexity(prompt: str) -> str:
-    words = prompt.lower().split()
-    word_count = len(words)
-    complex_keywords = [
-        "compare", "relationship", "transform", "series", "matrix",
-        "surface", "fourier", "eigen", "convergence", "integral",
-        "derivative", "graph", "tangent", "slope", "gradient",
-    ]
-    has_complex = any(kw in prompt.lower() for kw in complex_keywords)
+    # Match keywords as a word PREFIX, not a free substring: this catches
+    # inflections ("transformation"←transform, "derivatives"←derivative,
+    # "eigenvalues"←eigen) while rejecting the false positives a bare substring
+    # check produced ("paragraph"/"telegraph" no longer match "graph").
+    tokens = re.findall(r"[a-z]+", prompt.lower())
+    word_count = len(prompt.split())
+    has_complex = any(
+        tok.startswith(kw) for tok in tokens for kw in _COMPLEX_KEYWORDS
+    )
 
     if word_count > 12 or (word_count > 6 and has_complex):
         return "COMPLEX"
@@ -370,6 +429,16 @@ Rules:
 - role: "background" = grid/atmosphere, "primary" = the main mathematical object, "annotation" = labels/arrows/highlights
 - priority: 1=essential, 2=important, 3=decoration
 - Each phase transitions cleanly (old out, new in)
+
+Valid field values (use ONLY these):
+- type: a real Manim CE class — Text, MathTex, Tex, Circle, Square, Line, Arrow, Dot,
+  Axes, NumberPlane, VGroup, Polygon, Rectangle (no invented class names).
+- position: one of top, center, bottom, left, right, top_left, top_right,
+  bottom_left, bottom_right.
+- priority: integer 1, 2, or 3.
+- visible_from / visible_to: numbers in seconds, with visible_from < visible_to, and
+  every object's window inside the overall timeline (phase times below).
+- phases[].time: a [start, end] pair in seconds, contiguous and non-overlapping.
 """
 
 # ── Assembly functions ────────────────────────────────────────────────────────
@@ -379,8 +448,14 @@ def build_manim_system_prompt(
     prompt: str = "",
     scene_plan: str = "",
     tier: Tier | None = None,
+    storyboard: str = "",
 ) -> str:
-    """Build the tier-aware system prompt for code generation."""
+    """Build the tier-aware system prompt for code generation.
+
+    When a ``storyboard`` (cinematography IR) is supplied it is the AUTHORITATIVE
+    plan the generator must implement beat-by-beat; the lighter ``scene_plan``
+    layout is only used as a fallback when there is no storyboard.
+    """
     tier = tier or get_tier()
     sections = [BASE_MANIM_RULES]
     sections.extend(_style_and_budget_sections(tier))
@@ -388,7 +463,10 @@ def build_manim_system_prompt(
     complexity = build_complexity_modifier(prompt, tier) if prompt else ""
     if complexity:
         sections.append(complexity)
-    if scene_plan:
+    if storyboard:
+        # The director's plan wins — it already encodes composition/timing/camera.
+        sections.append(storyboard)
+    elif scene_plan:
         sections.append(f"## Scene Layout\n{scene_plan}")
     if theme_instructions:
         sections.append(theme_instructions)
@@ -402,8 +480,11 @@ def build_scene_plan_prompt() -> str:
 def build_layout_repair_prompt(issues: str, theme_instructions: str = "", prompt: str = "", tier: Tier | None = None) -> str:
     tier = tier or get_tier()
     safe_issues = issues.replace("{", "{{").replace("}", "}}")
-    sections = [LAYOUT_REPAIR_INTRO.format(issues=safe_issues), BASE_MANIM_RULES]
-    sections.extend(_style_and_budget_sections(tier))
+    # Layout repair only nudges positions/spacing/timing — it does NOT regenerate
+    # the scene. So we keep the lightweight layout rules (SCENE_AWARENESS) and the
+    # API-safety floor (BASE_MANIM_RULES) but DROP the heavy style/budget blocks
+    # that would otherwise balloon a focused repair with irrelevant direction.
+    sections = [LAYOUT_REPAIR_INTRO.format(issues=safe_issues), BASE_MANIM_RULES, SCENE_AWARENESS]
     if theme_instructions:
         sections.append(theme_instructions)
     return "\n\n".join(sections)
@@ -412,7 +493,8 @@ def build_layout_repair_prompt(issues: str, theme_instructions: str = "", prompt
 def build_manim_fix_prompt(error: str, theme_instructions: str = "", prompt: str = "", tier: Tier | None = None) -> str:
     tier = tier or get_tier()
     safe_error = error.replace("{", "{{").replace("}", "}}")
-    sections = [FIX_INTRO.format(error=safe_error), BASE_MANIM_RULES]
+    budget_note = _FIX_BUDGET_NOTE_CONSTRAINED if tier.name == "constrained" else _FIX_BUDGET_NOTE_CAPABLE
+    sections = [FIX_INTRO.format(error=safe_error, budget_note=budget_note), BASE_MANIM_RULES]
     sections.extend(_style_and_budget_sections(tier))
     if theme_instructions:
         sections.append(theme_instructions)

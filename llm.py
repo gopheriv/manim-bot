@@ -9,6 +9,7 @@ from typing import Any
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 
+from common import parse_llm_json
 from config import (
     DASHSCOPE_API_KEY,
     CHAT_MODEL,
@@ -19,6 +20,9 @@ from config import (
     CLAUDE_BASE_URL,
     CLAUDE_API_KEY,
     CLAUDE_MODEL,
+    GLM_BASE_URL,
+    GLM_API_KEY,
+    GLM_MODEL,
     LLM_PROVIDER,
     MANIM_MAX_OUTPUT_TOKENS,
     MANIM_ENABLE_THINKING,
@@ -29,6 +33,7 @@ from prompt_builder import (
     build_scene_plan_prompt,
     build_layout_repair_prompt,
 )
+from storyboard import build_storyboard_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,13 @@ qwen_client = AsyncOpenAI(
 claude_client = AsyncAnthropic(
     api_key=CLAUDE_API_KEY,
     base_url=CLAUDE_BASE_URL,
+    timeout=120,
+)
+
+# GLM-5.2 client (Baishan EdgeFN, Anthropic Messages format)
+glm_client = AsyncAnthropic(
+    api_key=GLM_API_KEY,
+    base_url=GLM_BASE_URL,
     timeout=120,
 )
 
@@ -86,6 +98,34 @@ def _build_extra_body(enable_thinking: bool = False) -> dict:
     return {"enable_thinking": enable_thinking}
 
 
+def _qwen_kwargs(enable_thinking: bool = False) -> dict:
+    """Keyword args to splat into a Qwen create() call.
+
+    Centralizes the ``extra_body={"enable_thinking": …}`` decision so every Qwen
+    call goes through one place. On a non-DashScope endpoint it contributes
+    nothing (the endpoint would reject the unknown param), so callers can splat it
+    unconditionally with ``**_qwen_kwargs()``.
+    """
+    extra = _build_extra_body(enable_thinking)
+    return {"extra_body": extra} if extra else {}
+
+
+def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Split OpenAI-style messages into (system_prompt, non-system messages).
+
+    Anthropic-format clients (Claude, GLM) take the system prompt as a separate
+    ``system=`` argument rather than a message with role "system".
+    """
+    system_msg = ""
+    rest: list[dict] = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msg = msg["content"]
+        else:
+            rest.append(msg)
+    return system_msg, rest
+
+
 async def _codegen_stream(messages: list[dict], max_tokens: int, timeout: int, enable_thinking: bool) -> tuple[str, str]:
     """Run a streamed code-gen completion, accumulating content + reasoning.
 
@@ -93,14 +133,13 @@ async def _codegen_stream(messages: list[dict], max_tokens: int, timeout: int, e
     chain-of-thought in `reasoning_content` (which we discard) and the answer in
     `content` (which we keep).
     """
-    extra = _build_extra_body(enable_thinking)
     stream = await gpt_coding_client.chat.completions.create(
         model=GPT_MODEL,
         messages=messages,
         max_tokens=max_tokens,
         timeout=timeout,
         stream=True,
-        **({"extra_body": extra} if extra else {}),
+        **_qwen_kwargs(enable_thinking),
     )
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -140,24 +179,23 @@ async def _codegen_complete(messages: list[dict], max_tokens: int | None = None,
         except Exception as e:
             logger.warning(f"Thinking code-gen failed ({e}); falling back to non-thinking")
 
-    fallback_extra = _build_extra_body(False)
     response = await gpt_coding_client.chat.completions.create(
         model=GPT_MODEL,
         messages=messages,
         max_tokens=max_tokens,
         timeout=timeout,
-        **({"extra_body": fallback_extra} if fallback_extra else {}),
+        **_qwen_kwargs(False),
     )
     return response.choices[0].message.content or ""
 
 
 # ── Manim code generation (GPT-5.5) ─────────────────────────────────────────
 
-async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "") -> str:
+async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "", storyboard: str = "") -> str:
     """Generate Manim animation code (Qwen 3.7 Max, reasoning ON, large output)."""
     try:
         messages = [
-            {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan)},
+            {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan, storyboard=storyboard)},
             {"role": "user", "content": prompt},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
@@ -182,6 +220,48 @@ async def fix_manim_code(original_prompt: str, error: str, theme_instructions: s
         return strip_code_fences(content)
     except Exception as e:
         logger.error(f"GPT self-heal error: {e}")
+        raise
+
+
+async def complete_manim_code(
+    partial_code: str,
+    original_prompt: str,
+    theme_instructions: str = "",
+    scene_plan: str = "",
+    storyboard: str = "",
+) -> str:
+    """Finish code that was cut off by the token limit (truncation, not a bug).
+
+    The model is given the partial output and asked to return the COMPLETE script
+    — keeping everything already written verbatim and only continuing from the cut
+    point. Much cheaper and more faithful than regenerating from scratch (which
+    discards correct work and often re-truncates). Uses the same large output
+    ceiling so the completed code has room to finish.
+    """
+    try:
+        system = build_manim_system_prompt(
+            theme_instructions, original_prompt, scene_plan=scene_plan, storyboard=storyboard,
+        )
+        system += (
+            "\n\n## COMPLETION MODE (CRITICAL)\n"
+            "The Python code below was CUT OFF by a length limit — it is INCOMPLETE, "
+            "not wrong. Return the FULL corrected script: keep everything already "
+            "written EXACTLY as-is (same objects, layout, colors, timing) and simply "
+            "continue from where it stops, closing every open block/animation and "
+            "finishing the scene. Do NOT redesign, do NOT start over, do NOT shorten "
+            "what is already there. Output ONLY the complete Python code."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": (
+                f"Original request: {original_prompt}\n\n"
+                f"Incomplete code (continue & complete it):\n```python\n{partial_code}\n```"
+            )},
+        ]
+        content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
+        return strip_code_fences(content)
+    except Exception as e:
+        logger.error(f"GPT completion error: {e}")
         raise
 
 
@@ -284,6 +364,32 @@ async def generate_scene_plan(prompt: str) -> str:
         raise
 
 
+async def generate_storyboard(
+    prompt: str,
+    lessons: list[str] | None = None,
+    hard_constraints: list[str] | None = None,
+) -> str:
+    """Generate a cinematography storyboard (JSON IR) for a request.
+
+    Uses the reasoning-on code-gen path: temporal/spatial/narrative planning is
+    exactly where chain-of-thought helps. Returns raw JSON text (caller parses).
+    Recurring Judge lessons (and hard constraints) are injected into the director
+    system prompt so defects are designed out at the planning stage.
+    """
+    try:
+        messages = [
+            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints)},
+            {"role": "user", "content": f"Storyboard this animation request: {prompt}"},
+        ]
+        # Reuse the thinking-on completion (with non-thinking fallback) — the
+        # output is JSON, but the planning benefits from reasoning.
+        content = await _codegen_complete(messages, max_tokens=4096, timeout=180)
+        return (content or "").strip()
+    except Exception as e:
+        logger.error(f"Storyboard generation error: {e}")
+        raise
+
+
 async def repair_layout(
     code: str,
     issues: list[str],
@@ -311,6 +417,8 @@ async def classify_intent(prompt: str, provider: str | None = None) -> str:
     active = provider or _active_provider
     if active == "claude":
         return await _classify_intent_claude(prompt)
+    if active == "glm":
+        return await _classify_intent_glm(prompt)
     return await _classify_intent_qwen(prompt)
 
 
@@ -332,7 +440,7 @@ async def _classify_intent_qwen(prompt: str) -> str:
             ],
             temperature=0,
             max_tokens=10,
-            extra_body={"enable_thinking": False},
+            **_qwen_kwargs(),
         )
         result = (response.choices[0].message.content or "").strip().upper()
         if "ANIM" in result:
@@ -366,6 +474,29 @@ async def _classify_intent_claude(prompt: str) -> str:
         return "CHAT"
 
 
+async def _classify_intent_glm(prompt: str) -> str:
+    try:
+        response = await glm_client.messages.create(
+            model=GLM_MODEL,
+            system=(
+                'Classify the user message as either "ANIMATE" or "CHAT". '
+                "Reply with ONLY one word. "
+                "ANIMATE = wants a Manim animation/visualization/drawing. "
+                "CHAT = general conversation, question, or explanation."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=10,
+        )
+        result = (response.content[0].text or "").strip().upper()
+        if "ANIM" in result:
+            return "ANIMATE"
+        return "CHAT"
+    except Exception as e:
+        logger.error(f"GLM intent classification error: {e}")
+        return "CHAT"
+
+
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
 async def chat(messages: list[dict], provider: str | None = None) -> str:
@@ -373,6 +504,8 @@ async def chat(messages: list[dict], provider: str | None = None) -> str:
     active = provider or _active_provider
     if active == "claude":
         return await _chat_claude(messages)
+    if active == "glm":
+        return await _chat_glm(messages)
     return await _chat_qwen(messages)
 
 
@@ -383,7 +516,7 @@ async def _chat_qwen(messages: list[dict]) -> str:
             messages=messages,
             temperature=0.7,
             max_tokens=2048,
-            extra_body={"enable_thinking": False},
+            **_qwen_kwargs(),
         )
         message = response.choices[0].message
         return (
@@ -398,13 +531,7 @@ async def _chat_qwen(messages: list[dict]) -> str:
 
 async def _chat_claude(messages: list[dict]) -> str:
     try:
-        system_msg = ""
-        anthropic_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system_msg = msg["content"]
-            else:
-                anthropic_messages.append(msg)
+        system_msg, anthropic_messages = _split_system(messages)
 
         response = await claude_client.messages.create(
             model=CLAUDE_MODEL,
@@ -419,21 +546,44 @@ async def _chat_claude(messages: list[dict]) -> str:
         return f"⚠️ Chat temporarily unavailable: {e}"
 
 
+async def _chat_glm(messages: list[dict]) -> str:
+    """Chat via GLM-5.2 (Anthropic Messages format)."""
+    try:
+        system_msg, anthropic_messages = _split_system(messages)
+
+        response = await glm_client.messages.create(
+            model=GLM_MODEL,
+            system=system_msg,
+            messages=anthropic_messages,
+            temperature=0.7,
+            max_tokens=2048,
+        )
+        return response.content[0].text or "_(No response)_"
+    except Exception as e:
+        logger.error(f"GLM chat error: {e}")
+        return f"⚠️ Chat temporarily unavailable: {e}"
+
+
 # ── Vision ────────────────────────────────────────────────────────────────────
 
 async def chat_with_image(image_bytes: bytes, caption: str, provider: str | None = None) -> str:
-    """Vision — routed by provider."""
+    """Vision — routed by provider. GLM has no vision support — falls back to qwen."""
     active = provider or _active_provider
     if active == "claude":
         return await _chat_with_image_claude(image_bytes, caption)
+    if active == "glm":
+        logger.warning("GLM has no vision support — falling back to Qwen")
     return await _chat_with_image_qwen(image_bytes, caption)
 
 
 async def chat_with_images(images: list[bytes], caption: str, provider: str | None = None) -> str:
-    """Multi-image vision — send several frames in one message (for the visual critic)."""
+    """Multi-image vision — send several frames in one message (for the visual critic).
+    GLM has no vision support — falls back to qwen."""
     active = provider or _active_provider
     if active == "claude":
         return await _chat_with_images_claude(images, caption)
+    if active == "glm":
+        logger.warning("GLM has no vision support — falling back to Qwen for visual critic")
     return await _chat_with_images_qwen(images, caption)
 
 
@@ -449,7 +599,7 @@ async def _chat_with_images_qwen(images: list[bytes], caption: str) -> str:
             messages=[{"role": "user", "content": content}],
             max_tokens=1024,
             temperature=0.1,
-            extra_body={"enable_thinking": False},
+            **_qwen_kwargs(),
         )
         return (getattr(response.choices[0].message, "content", None) or "").strip()
     except Exception as e:
@@ -492,12 +642,10 @@ async def _chat_with_image_qwen(image_bytes: bytes, caption: str) -> str:
                 ],
             }],
             max_tokens=2048,
-            extra_body={"enable_thinking": False},
+            **_qwen_kwargs(),
         )
         content = getattr(response.choices[0].message, "content", None) or ""
-        content = re.sub(r"^```[a-z]*\n?", "", content.strip(), flags=re.MULTILINE)
-        content = re.sub(r"\n?```$", "", content.strip(), flags=re.MULTILINE)
-        return content.strip() or "_(empty response)_"
+        return strip_code_fences(content).strip() or "_(empty response)_"
     except Exception as e:
         logger.error(f"Qwen vision error: {e}")
         return f"🖼️ Vision temporarily unavailable: {e}"
@@ -527,6 +675,10 @@ async def _chat_with_image_claude(image_bytes: bytes, caption: str) -> str:
         return f"🖼️ Vision temporarily unavailable: {e}"
 
 
+# NOTE: GLM-5.2 has no vision capability, so there are deliberately no GLM image
+# handlers — chat_with_image[s] route the "glm" provider to the Qwen vision path.
+
+
 # ── Template config filling ──────────────────────────────────────────────────
 
 TEMPLATE_CONFIG_PROMPT = """You are a scene configuration assistant. Given a user's animation description and a template name, fill in the template parameters as JSON.
@@ -534,19 +686,18 @@ TEMPLATE_CONFIG_PROMPT = """You are a scene configuration assistant. Given a use
 Template: {template_name}
 User prompt: {prompt}
 
-Respond with ONLY a valid JSON object matching this schema:
-{{
-  "title": "string — title of the animation",
-  "equation": "string — LaTeX equation to display (or empty)",
-  "damping": "number — damping coefficient (default 0.15)",
-  "frequency": "number — oscillation frequency (default 1.0)",
-  "amplitude": "number — amplitude (default 1.0)",
-  "colors": ["#hex", "#hex", "#hex"] — 3 colors for the scene",
-  "duration": "integer — scene duration in seconds (10-20)",
-  "extra_params": {{"key": value}} — any additional template-specific parameters"
-}}
+Fields (include only those that differ from the defaults):
+- title: string — title of the animation
+- equation: string — LaTeX equation to display (or empty)
+- damping: number — damping coefficient (default 0.15)
+- frequency: number — oscillation frequency (default 1.0)
+- amplitude: number — amplitude (default 1.0)
+- colors: array of exactly 3 hex color strings, e.g. ["#1f77b4", "#ff7f0e", "#2ca02c"]
+- duration: integer — scene duration in seconds (10-20)
+- extra_params: object — any additional template-specific key/value parameters
 
-Only include parameters that differ from defaults. No explanation, no markdown fences.
+Respond with ONLY a valid JSON object (no comments, no trailing prose, no markdown fences). Example:
+{{"title": "Damped Oscillator", "damping": 0.2, "colors": ["#1f77b4", "#ff7f0e", "#2ca02c"], "duration": 15}}
 """
 
 
@@ -563,14 +714,10 @@ async def fill_template_config(template_name: str, prompt: str) -> dict[str, Any
             ],
             max_tokens=512,
             timeout=30,
-            extra_body={"enable_thinking": False},
+            **_qwen_kwargs(),
         )
         content = getattr(response.choices[0].message, "content", None) or ""
-        content = re.sub(r"^```[a-z]*\n?", "", content.strip(), flags=re.MULTILINE)
-        content = re.sub(r"\n?```$", "", content.strip(), flags=re.MULTILINE)
-
-        import json
-        return json.loads(content.strip())
+        return parse_llm_json(content) or {}
     except Exception as e:
         logger.error(f"Template config fill error: {e}")
         return {}

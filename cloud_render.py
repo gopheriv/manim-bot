@@ -17,9 +17,11 @@ import json
 import logging
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
+from common import subprocess_creation_flags
 from config import (
     CLOUD_RENDER_REPO,
     CLOUD_RENDER_WORKFLOW,
@@ -33,12 +35,21 @@ logger = logging.getLogger("cloud_render")
 # Last error (parallels renderer.render._last_error for uniform error surfacing)
 cloud_render_last_error = ""
 
+
+def get_last_error() -> str:
+    """Accessor mirroring renderer.get_last_error() — uniform error surfacing."""
+    return cloud_render_last_error
+
 # The render harness lives here AND in the public worker repo (which can't read
 # this private repo at run time). `ensure_worker_current` keeps the worker copy
 # in lock-step so it can never silently go stale. Checked once per process.
 CI_RENDER_PATH = "deploy/ci_render.py"
 _LOCAL_CI_RENDER = Path(__file__).parent / "deploy" / "ci_render.py"
-_worker_synced = False
+# Re-verify the worker copy periodically rather than trusting "synced once,
+# synced forever": if the remote worker repo is changed externally, the local
+# process picks that up within the TTL instead of only on restart.
+_WORKER_SYNC_TTL_S = 600  # 10 minutes
+_worker_synced_at = 0.0
 
 
 def _set_error(msg: str) -> None:
@@ -56,6 +67,7 @@ async def _gh(*args: str, timeout: int = 60) -> tuple[int, str, str]:
         "gh", *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        creationflags=subprocess_creation_flags(),  # no console-window flash on Windows
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -96,8 +108,8 @@ async def ensure_worker_current(repo: str | None = None, force: bool = False) ->
     not block the render (a truly stale worker will still surface a clear error
     from the render itself). Returns True if the worker is known-current.
     """
-    global _worker_synced
-    if _worker_synced and not force:
+    global _worker_synced_at
+    if not force and _worker_synced_at and (time.monotonic() - _worker_synced_at) < _WORKER_SYNC_TTL_S:
         return True
     repo = repo or CLOUD_RENDER_REPO
     if not repo:
@@ -116,7 +128,7 @@ async def ensure_worker_current(repo: str | None = None, force: bool = False) ->
             remote_sha = meta.get("sha")
             remote = base64.b64decode((meta.get("content") or "").replace("\n", ""))
             if remote == local:
-                _worker_synced = True
+                _worker_synced_at = time.monotonic()
                 return True  # already in sync — no push needed
         except (json.JSONDecodeError, ValueError, TypeError):
             pass  # unparseable → fall through and overwrite
@@ -132,7 +144,7 @@ async def ensure_worker_current(repo: str | None = None, force: bool = False) ->
         logger.warning("worker sync push failed (rc=%s): %s", rc, (err or out).strip())
         return False
     logger.info("Synced ci_render.py to worker %s", repo)
-    _worker_synced = True
+    _worker_synced_at = time.monotonic()
     return True
 
 
@@ -202,7 +214,7 @@ async def await_render(
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     run_id: int | None = None
 
@@ -252,8 +264,12 @@ async def _download_artifact(run_id: int, job_id: str, dest_dir: Path, repo: str
             shutil.rmtree(stale, ignore_errors=True)
     (dest_dir / "render.mp4").unlink(missing_ok=True)
 
+    # Retry transient failures (network blips, GH rate limits, timeouts, a not-
+    # yet-available artifact), not just the historical "file exists" case. Each
+    # attempt extracts into a brand-new empty dir, so a retry is always safe.
+    _MAX_ATTEMPTS = 3
     rc, err = 1, ""
-    for _attempt in range(2):
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
         # tempfile.mkdtemp() creates a fresh, guaranteed-unique EMPTY directory.
         job_dir = Path(tempfile.mkdtemp(prefix=f"render-{job_id}-", dir=dest_dir))
         rc, out, err = await _gh(
@@ -268,14 +284,15 @@ async def _download_artifact(run_id: int, job_id: str, dest_dir: Path, repo: str
                 return None
             logger.info("Cloud render %s downloaded: %s", job_id, mp4s[0])
             return mp4s[0]
-        # Should be impossible in a fresh empty dir; if gh still trips on an
-        # existing file, wipe and retry once in another fresh dir. Any other
-        # failure (network, auth, missing artifact) won't be helped by a retry.
         shutil.rmtree(job_dir, ignore_errors=True)
-        if "file exists" not in (err or "").lower():
-            break
+        if attempt < _MAX_ATTEMPTS:
+            logger.warning(
+                "artifact download attempt %d/%d failed (rc=%s): %s — retrying",
+                attempt, _MAX_ATTEMPTS, rc, (err or out).strip()[:200],
+            )
+            await asyncio.sleep(min(5 * attempt, 15))  # linear backoff
 
-    _set_error(f"artifact download failed (rc={rc}): {err.strip()}")
+    _set_error(f"artifact download failed after {_MAX_ATTEMPTS} attempts (rc={rc}): {err.strip()}")
     return None
 
 

@@ -53,7 +53,7 @@ async def add_watermark(video_path: Path, output_dir: Path | None = None) -> Pat
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
 

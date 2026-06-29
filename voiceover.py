@@ -14,6 +14,7 @@ from pathlib import Path
 import edge_tts
 import imageio_ffmpeg
 
+from common import CREATE_NO_WINDOW
 from config import TTS_VOICE, TTS_RATE
 
 logger = logging.getLogger("voiceover")
@@ -28,7 +29,7 @@ def _get_duration_sync(path: Path) -> float:
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", str(path)],
             capture_output=True, text=True, timeout=5,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         if result.returncode == 0 and result.stdout.strip():
             return float(result.stdout.strip())
@@ -39,7 +40,7 @@ def _get_duration_sync(path: Path) -> float:
         result = subprocess.run(
             [FFMPEG, "-i", str(path), "-hide_banner"],
             capture_output=True, text=True, timeout=15,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return 0.0
@@ -54,6 +55,11 @@ def _get_duration_sync(path: Path) -> float:
 async def _get_duration(path: Path) -> float:
     """Get media duration asynchronously."""
     return await asyncio.to_thread(_get_duration_sync, path)
+
+
+# Public alias — other modules (e.g. visual_critic) should depend on this stable
+# name rather than the leading-underscore internal one.
+get_duration = _get_duration
 
 
 def _parse_rate(rate_str: str | None) -> int:
@@ -162,7 +168,7 @@ async def merge(video_path: Path, audio_path: Path, output_path: Path) -> Path |
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
+            creationflags=CREATE_NO_WINDOW,
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
 
@@ -211,7 +217,7 @@ async def strip_audio(video_path: Path, output_dir: Path) -> Path | None:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
 
@@ -260,7 +266,7 @@ async def video_to_gif(video_path: Path, output_dir: Path) -> Path | None:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
 

@@ -15,11 +15,21 @@ from typing import Callable
 
 import psutil
 
+from common import CREATE_NO_WINDOW
 from render_tier import Tier, get_tier
 
 logger = logging.getLogger(__name__)
 
 RENDER_TIMEOUT = 600  # 10 minutes
+
+# RAM guard rails. The pre-check (before starting) is stricter than the in-flight
+# kill threshold ON PURPOSE: we refuse to *start* a render once memory is already
+# elevated, but tolerate a render that climbs higher mid-flight before killing it
+# (a kill wastes the work already done). Keep PRECHECK < KILL so a render that
+# barely passes the gate still has headroom before the in-flight guard trips.
+RAM_PRECHECK_PCT = 85   # refuse to start a new render above this
+RAM_KILL_PCT = 92       # kill an in-flight render above this
+
 # OS temp dir — portable across machines/users (was a hardcoded C:/Users/... path).
 RENDER_DIR = Path(tempfile.gettempdir()) / "manim_render"
 SCENE_DIR = RENDER_DIR
@@ -140,7 +150,7 @@ async def render(
     """
     tier = tier or get_tier()
     mem = psutil.virtual_memory()
-    if mem.percent > 85:
+    if mem.percent > RAM_PRECHECK_PCT:
         render._last_error = (
             f"Render blocked: system RAM at {mem.percent:.0f}% "
             f"({mem.available / 1024**3:.1f} GB free). Close other apps and retry."
@@ -211,7 +221,6 @@ async def render(
     logger.info(f"Rendering: {' '.join(cmd_args)}")
 
     # Process flags: CREATE_NO_WINDOW always, BELOW_NORMAL for heavy scenes
-    CREATE_NO_WINDOW = 0x08000000
     BELOW_NORMAL_PRIORITY = 0x00004000
     use_low_priority = weight.is_heavy and tier.below_normal_priority
     creation_flags = CREATE_NO_WINDOW | (BELOW_NORMAL_PRIORITY if use_low_priority else 0)
@@ -254,7 +263,7 @@ async def render(
 
             # Memory guard — kill render if RAM goes critical mid-flight
             mem = psutil.virtual_memory()
-            if mem.percent > 92:
+            if mem.percent > RAM_KILL_PCT:
                 logger.warning(f"RAM at {mem.percent:.0f}% during render — killing process")
                 _kill_process_tree(proc.pid)
                 render._last_error = (
@@ -274,6 +283,12 @@ async def render(
                 line = await asyncio.wait_for(proc.stderr.readline(), timeout=0.5)
             except asyncio.TimeoutError:
                 line = None
+
+            # At EOF, readline() returns b"" immediately. If the process hasn't
+            # set its returncode yet, looping without a pause would busy-spin the
+            # CPU. Sleep briefly so we yield until the process actually exits.
+            if line == b"" and proc.stderr.at_eof() and proc.returncode is None:
+                await asyncio.sleep(0.1)
 
             if line:
                 stderr_buf.extend(line)
@@ -324,13 +339,16 @@ async def render(
             return None
 
         if proc.returncode == 0:
-            video = _find_video(chat_id)
+            video, reason = _find_video(chat_id)
             if video:
                 size_mb = video.stat().st_size / (1024 * 1024)
                 logger.info(f"Render OK: {video} ({size_mb:.1f} MB)")
                 render._last_error = ""
                 return video
-            render._last_error = "Manim exited OK but GenScene.mp4 not found."
+            if reason == "too_small":
+                render._last_error = "Manim exited OK but produced an empty/truncated GenScene.mp4 (0 frames rendered?)."
+            else:
+                render._last_error = "Manim exited OK but GenScene.mp4 not found."
             logger.warning(render._last_error)
             return None
 
@@ -351,6 +369,16 @@ async def render(
 
 
 render._last_error = ""
+
+
+def get_last_error() -> str:
+    """Accessor for the last render error.
+
+    Callers should use this rather than reaching into the ``render._last_error``
+    function attribute directly, so the storage detail stays encapsulated here
+    (mirrors cloud_render.get_last_error()).
+    """
+    return getattr(render, "_last_error", "") or ""
 
 
 async def _validate_python(scene_file: Path) -> str | None:
@@ -375,14 +403,22 @@ async def _validate_python(scene_file: Path) -> str | None:
         if re.search(pattern, code):
             return f"Numpy 2.x incompatibility: {msg}"
 
-    # Syntax validation via py_compile
+    # Syntax validation via py_compile. Bounded by a timeout: py_compile only
+    # parses (it never executes the module), but a hung subprocess must not block
+    # the render pipeline forever.
     proc = await asyncio.create_subprocess_exec(
         "python", "-m", "py_compile", str(scene_file),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        creationflags=0x08000000,
+        creationflags=CREATE_NO_WINDOW,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        if proc.pid:
+            _kill_process_tree(proc.pid)
+        logger.warning("py_compile validation timed out after 30s — skipping syntax gate")
+        return None  # don't block the render on a stuck validator
     if proc.returncode == 0:
         return None
     output = (stderr or stdout).decode("utf-8", errors="replace")
@@ -443,15 +479,24 @@ def _write_scene(code: str, chat_id: int) -> Path:
     return scene_file
 
 
-def _find_video(chat_id: int) -> Path | None:
+def _find_video(chat_id: int) -> tuple[Path | None, str]:
+    """Locate the rendered mp4.
+
+    Returns (path, reason). On success reason is "". On failure reason
+    distinguishes the two cases the caller previously could not tell apart:
+    "missing" (no output file at all) vs "too_small" (a file exists but is a
+    truncated/empty render) — which point at different root causes.
+    """
     search = RENDER_DIR / "media" / "videos" / f"scene_{chat_id}"
     if not search.exists():
-        return None
+        return None, "missing"
+    found_tiny = False
     for mp4 in search.rglob("GenScene.mp4"):
         if mp4.stat().st_size > 1024:
-            return mp4
+            return mp4, ""
+        found_tiny = True
         logger.warning(f"Skipping tiny video ({mp4.stat().st_size} bytes): {mp4}")
-    return None
+    return None, ("too_small" if found_tiny else "missing")
 
 
 def get_last_generated_code(chat_id: int) -> str | None:

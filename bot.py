@@ -35,16 +35,22 @@ from config import (
     CRITIC_REPAIR_THRESHOLD,
     VISUAL_CRITIC_ENABLED,
     VISUAL_CRITIC_MAX_PASSES,
+    STORYBOARD_ENABLED,
+    BEST_OF_N,
+    BEST_OF_N_DRAFT_QUALITY,
 )
 from database import db
 from fallback_scene import build_fallback_scene
-from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, generate_scene_plan, repair_layout, repair_targeted, edit_manim_code, strip_code_fences, fill_template_config
+from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, complete_manim_code, generate_scene_plan, generate_storyboard, repair_layout, repair_targeted, edit_manim_code, strip_code_fences, fill_template_config
+from common import looks_truncated
 from scene_planner import parse_scene_plan, format_plan_for_prompt
+from storyboard import parse_storyboard, validate_storyboard, format_storyboard_for_codegen, storyboard_narration
+from best_of_n import select_best_code
 from scene_validator import validate_layout, has_issues
 from markdown_utils import strip_markdown
 from queue_manager import render_queue, TaskStatus
 from rate_limiter import rate_limiter
-from renderer import render, cleanup, get_last_generated_code, classify_render_error
+from renderer import render, cleanup, get_last_generated_code, classify_render_error, get_last_error
 from render_tier import get_tier, cloud_available, get_cloud_quality, get_cloud_fps
 import settings as user_settings
 from themes import get_theme, next_theme, build_theme_prompt
@@ -53,12 +59,23 @@ from templates import get_registry
 from tiktok_integration import detect_tiktok_mode
 from prompt_builder_tiktok import get_tiktok_prompt
 from feedback import log_feedback
+import config  # module handle for startup validation (config.validate_config)
+# NOTE: the module `cloud_render` exposes a function ALSO named `cloud_render`,
+# so calls read `cloud_render.cloud_render(...)`. Kept for compatibility.
 import cloud_render
 from watermark import add_watermark
 from prompt_enhancer import enhance_prompt
 from critic_agent import critique_code, static_quality_check
 from judge_ai import judge_code, repair_by_judge, JudgeVerdict, JudgeReview
-from error_learner import log_error, get_adaptive_prompt_modifiers
+from error_learner import (
+    log_error,
+    get_adaptive_prompt_modifiers,
+    log_judge_rejection,
+    get_judge_avoidance_modifiers,
+    get_judge_rejection_stats,
+    get_top_judge_lessons,
+    get_recurring_lesson_constraints,
+)
 from edu_reviewer import review_education
 from course_generator import generate_course
 from exam_prep import get_random_question, generate_animation_for_question
@@ -66,7 +83,26 @@ from gallery import get_featured, get_by_category, get_by_id, search as gallery_
 from multi_agent_debate import debate_generate
 from visual_critic import critique_render
 from referral import register_user, get_user_referral_info
-from teacher_dashboard import register_teacher, get_teacher_dashboard, get_engagement_stats, add_student
+# teacher_dashboard is an OPTIONAL feature — a broken import here must not take
+# down the whole bot. Fall back to stubs that report the feature is unavailable.
+try:
+    from teacher_dashboard import register_teacher, get_teacher_dashboard, get_engagement_stats, add_student
+    _TEACHER_DASHBOARD_OK = True
+except Exception as _teacher_err:  # noqa: BLE001
+    logging.getLogger(__name__).warning("teacher_dashboard unavailable: %s", _teacher_err)
+    _TEACHER_DASHBOARD_OK = False
+
+    def register_teacher(*_a, **_k):
+        return None
+
+    def get_teacher_dashboard(*_a, **_k):
+        return None
+
+    def get_engagement_stats(*_a, **_k):
+        return {}
+
+    def add_student(*_a, **_k):
+        return None
 
 # Ensure log directory exists before configuring handlers
 Path("logs").mkdir(exist_ok=True)
@@ -89,6 +125,10 @@ dp = Dispatcher()
 # function-local would be garbage-collected after that function returns. Keeping
 # the set at module scope guarantees these outlive the call that spawned them.
 _d1_tasks: set[asyncio.Task] = set()
+
+# Module-level strong reference to the analytics flusher task (see main()), so it
+# can never be garbage-collected mid-run even if main()'s local were dropped.
+_analytics_task: asyncio.Task | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +170,14 @@ async def _cancel_task(task: asyncio.Task) -> None:
         pass
 
 
-async def _safe_edit(message: types.Message, text: str, **kwargs) -> None:
-    """Edit a message with Markdown safety — falls back to plain text on parse errors."""
+async def _safe_edit(message: types.Message | None, text: str, **kwargs) -> None:
+    """Edit a message with Markdown safety — falls back to plain text on parse errors.
+
+    No-ops when ``message`` is None so callers don't have to guard a status handle
+    that may not have been created on every path.
+    """
+    if message is None:
+        return
     try:
         await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except TelegramBadRequest:
@@ -182,13 +228,30 @@ def get_example_by_index(index: int) -> dict:
 # Progress Updates (chat action spinner while LLM generates code)
 # ---------------------------------------------------------------------------
 
-async def _progress_loop(chat_id: int, render_task, narration_task: asyncio.Task | None, status_message: types.Message | None = None):
+_STATUS_EMOJI = {
+    "completed": "✅",
+    "failed": "❌",
+    "cancelled": "🚫",
+    "running": "▶️",
+    "pending": "⏳",
+    "queued": "⏳",
+}
+
+
+def _status_emoji(status: str) -> str:
+    """Map a render status to an emoji. Distinct glyphs for cancelled/running so
+    they don't all collapse into the ambiguous hourglass."""
+    return _STATUS_EMOJI.get((status or "").lower(), "❔")
+
+
+async def _progress_loop(chat_id: int, render_task, narration_task: asyncio.Task | None):
     """Send periodic chat-action spinner updates while render/narration run.
 
     Note: this loop only sends the lightweight Telegram chat-action (the
     "recording video…" indicator). It deliberately does NOT edit the status
     message text — the renderer's progress callback (`_on_manim_progress`) is
     the single owner of the status text, so the two never clobber each other.
+    (Hence no status-message parameter: it would be dead weight.)
     """
     actions = [
         ChatAction.RECORD_VIDEO,
@@ -338,8 +401,11 @@ async def _send_animation(
     # Cache key includes theme + quality + format so different variants don't
     # collide (same prompt, different look = different cache entry). Built from
     # the original prompt so the check (here) and save (later) always agree even
-    # after prompt enhancement rewrites `prompt`.
-    cache_key = f"{original_prompt}|theme={user_theme}|q={user_quality}|tt={int(bool(tiktok_mode))}"
+    # after prompt enhancement rewrites `prompt`. Edits bypass the cache entirely,
+    # so there's no point computing a key for them.
+    cache_key = "" if skip_cache else (
+        f"{original_prompt}|theme={user_theme}|q={user_quality}|tt={int(bool(tiktok_mode))}"
+    )
 
     # D1 cache check (skipped for edits so the user always gets the modified version)
     if not skip_cache:
@@ -363,6 +429,11 @@ async def _send_animation(
             code: str = ""
             theme_prompt: str = ""  # Always defined — empty for templates, built for LLM path
             scene_plan_json: str = ""  # Always defined — empty for templates, built for LLM path
+            storyboard_obj = None  # parsed cinematography IR (when the storyboard step runs)
+            storyboard_text: str = ""  # codegen-formatted storyboard; reused on Judge regen
+            status_msg = None  # status message handle; set before the Judge loop, reused by self-heal
+            top_lessons: list[str] = []       # recurring Judge lessons (planning-stage guidance)
+            hard_constraints: list[str] = []  # lessons seen >=3x → MUST-NOT rules, used on regen
 
             # ── PRE-GENERATED: render a candidate produced upstream (e.g. the
             # /debate winner) instead of generating a fresh, unrelated one ──
@@ -461,34 +532,101 @@ async def _send_animation(
                     theme_prompt += error_modifiers
                     logger.info("Error pattern modifiers added to prompt")
 
-                # ── Scene Awareness: plan → generate → validate → repair ──
-                # Step 1: Generate scene composition plan (non-fatal on failure)
-                try:
-                    raw_plan = await generate_scene_plan(prompt)
-                    plan = parse_scene_plan(raw_plan)
-                    if plan:
-                        scene_plan_json = format_plan_for_prompt(plan)
-                        logger.info(f"Scene plan generated: {len(plan.get('objects', []))} objects, "
-                                    f"{len(plan.get('phases', []))} phases")
-                    else:
-                        logger.warning("Scene plan parsing failed, proceeding without plan")
-                except Exception as e:
-                    logger.warning(f"Scene plan generation failed (non-fatal): {e}")
+                # Learned Judge lessons: recurring defects to design OUT. The top
+                # few seed the storyboard (planning stage) so they shape the plan
+                # instead of being buried in a code-gen footer; lessons that have
+                # recurred >=3x become hard MUST-NOT constraints (also reused on
+                # Judge regen below).
+                top_lessons = get_top_judge_lessons(limit=3)
+                hard_constraints = get_recurring_lesson_constraints(min_count=3)
 
-                # Step 2: Generate code with scene plan context (with retries)
-                for attempt in range(1, GPT_MAX_RETRIES + 1):
+                # ── Step 1: Direction — storyboard (cinematography IR) FIRST ──
+                # A validated beat/shot/timing/camera/narration plan becomes the
+                # authoritative spec the generator implements. Non-fatal: on any
+                # failure we fall back to the lighter scene-layout plan below.
+                storyboard_text = ""
+                if STORYBOARD_ENABLED:
                     try:
-                        logger.info(f"Trying {GPT_MODEL} for code generation (attempt {attempt}/{GPT_MAX_RETRIES})")
-                        code = await generate_manim_code(
-                            prompt, theme_instructions=theme_prompt, scene_plan=scene_plan_json
+                        await _safe_reply(message, "🎬 Storyboarding the shots…")
+                        raw_sb = await generate_storyboard(
+                            prompt, lessons=top_lessons, hard_constraints=hard_constraints,
                         )
-                        if code and code.strip():
-                            break
+                        sb = parse_storyboard(raw_sb)
+                        if sb:
+                            issues = validate_storyboard(sb)
+                            if issues:
+                                logger.info("Storyboard composition notes: %s", "; ".join(issues[:4]))
+                            storyboard_text = format_storyboard_for_codegen(sb)
+                            storyboard_obj = sb
+                            logger.info(
+                                "Storyboard generated: %d beats, ~%ss target",
+                                len(sb.get("beats", [])), sb.get("duration_target_s", "?"),
+                            )
+                        else:
+                            logger.warning("Storyboard parse failed — falling back to scene-layout plan")
                     except Exception as e:
-                        logger.warning(f"Code gen attempt {attempt} failed: {e}")
-                        if attempt == GPT_MAX_RETRIES:
-                            raise
-                        await asyncio.sleep(2)
+                        logger.warning(f"Storyboard generation failed (non-fatal): {e}")
+
+                # If no storyboard ran, the learned lessons never reached a planner.
+                # Fall back to the code-gen footer so they aren't lost (this is the
+                # ONLY path that still uses the footer — with a storyboard the
+                # lessons are already baked into the plan).
+                if not storyboard_text:
+                    judge_avoidance = get_judge_avoidance_modifiers()
+                    if judge_avoidance:
+                        theme_prompt += judge_avoidance
+                        logger.info("Judge-rejection avoidance added to code-gen footer (no storyboard)")
+
+                # ── Scene Awareness fallback: lighter layout plan (only if no storyboard) ──
+                if not storyboard_text:
+                    try:
+                        raw_plan = await generate_scene_plan(prompt)
+                        plan = parse_scene_plan(raw_plan)
+                        if plan:
+                            scene_plan_json = format_plan_for_prompt(plan)
+                            logger.info(f"Scene plan generated: {len(plan.get('objects', []))} objects, "
+                                        f"{len(plan.get('phases', []))} phases")
+                        else:
+                            logger.warning("Scene plan parsing failed, proceeding without plan")
+                    except Exception as e:
+                        logger.warning(f"Scene plan generation failed (non-fatal): {e}")
+
+                # Step 2: Best-of-N tournament (when enabled + cloud available)
+                # Generate N diverse candidates, render drafts on the cloud farm,
+                # vision-rank the actual frames, and keep the winner. Falls back
+                # silently to single-candidate generation on any failure.
+                if BEST_OF_N > 1 and cloud_available():
+                    try:
+                        await _safe_reply(message, f"🏆 Running best-of-{BEST_OF_N} tournament…")
+                        winner = await select_best_code(
+                            prompt, theme_prompt,
+                            n=BEST_OF_N,
+                            chat_id=chat_id,
+                            draft_quality=BEST_OF_N_DRAFT_QUALITY,
+                        )
+                        if winner:
+                            code = winner
+                            logger.info("Best-of-N tournament produced a winner — skipping single generation")
+                    except Exception as e:
+                        logger.warning(f"Best-of-N tournament failed (non-fatal, falling back): {e}")
+
+                # Step 3: Generate code with the storyboard (or layout plan) context
+                # (only runs if best-of-N didn't already produce code)
+                if not code:
+                    for attempt in range(1, GPT_MAX_RETRIES + 1):
+                        try:
+                            logger.info(f"Trying {GPT_MODEL} for code generation (attempt {attempt}/{GPT_MAX_RETRIES})")
+                            code = await generate_manim_code(
+                                prompt, theme_instructions=theme_prompt,
+                                scene_plan=scene_plan_json, storyboard=storyboard_text,
+                            )
+                            if code and code.strip():
+                                break
+                        except Exception as e:
+                            logger.warning(f"Code gen attempt {attempt} failed: {e}")
+                            if attempt == GPT_MAX_RETRIES:
+                                raise
+                            await asyncio.sleep(2)
 
                 if not code or not code.strip():
                     await _safe_reply(message, "⚠️ Empty code generated. Try rephrasing your description.")
@@ -500,14 +638,35 @@ async def _send_animation(
 
             code = strip_code_fences(code)
 
-            # Step 3: Layout validation — detect overlap/crowding before rendering
+            # ── Truncation guard: complete cut-off code, don't judge/regenerate it ──
+            # Hitting the token limit mid-scene was the single biggest cause of
+            # Judge rejections. Detect it deterministically and ask the model to
+            # FINISH the existing code (cheap, faithful) before any review — so a
+            # judge iteration is never wasted rejecting code that just stops early.
+            if looks_truncated(code):
+                logger.info("Generated code looks truncated — completing instead of judging/regenerating")
+                await _safe_reply(message, "🧩 Code was cut off — completing it…")
+                try:
+                    completed = strip_code_fences(await complete_manim_code(
+                        code, prompt, theme_instructions=theme_prompt,
+                        scene_plan=scene_plan_json, storyboard=storyboard_text,
+                    ))
+                    if completed and "class GenScene" in completed and not looks_truncated(completed):
+                        code = completed
+                        logger.info("Truncated code completed successfully")
+                    else:
+                        logger.warning("Completion did not yield complete code — proceeding with original")
+                except Exception as e:
+                    logger.warning(f"Code completion failed (non-fatal): {e}")
+
+            # Step 4: Layout validation — detect overlap/crowding before rendering
             layout_issues = validate_layout(code)
             if has_issues(layout_issues):
                 logger.info(f"Layout validator found {len(layout_issues)} issues, attempting repair")
                 for issue in layout_issues:
                     logger.debug(f"  Layout issue: {issue}")
 
-                # Step 4: Layout repair — fix ONLY spatial/timing, preserve creative metaphor
+                # Step 5: Layout repair — fix ONLY spatial/timing, preserve creative metaphor
                 try:
                     repaired = await repair_layout(code, layout_issues, theme_prompt, prompt)
                     if repaired and repaired.strip():
@@ -615,6 +774,18 @@ async def _send_animation(
                     f"warnings={len(judge_review.warnings)}"
                 )
 
+                # Remember every rejection (reason + the offending code) so the
+                # generator is warned next time and never repeats the same defect.
+                # Logged BEFORE repair/regeneration overwrites `code`.
+                if judge_review.verdict in (JudgeVerdict.REPAIR, JudgeVerdict.REJECT):
+                    rejection_reasons = list(judge_review.repair_instructions) + list(judge_review.critical_issues)
+                    if judge_review.regenerate_reason:
+                        rejection_reasons.append(judge_review.regenerate_reason)
+                    try:
+                        log_judge_rejection(rejection_reasons, code=code, verdict=judge_review.verdict.value)
+                    except Exception as e:
+                        logger.warning(f"Could not log judge rejection (non-fatal): {e}")
+
                 if judge_review.verdict == JudgeVerdict.ACCEPT:
                     logger.info("Judge ACCEPTED code for render")
                     await _safe_edit(
@@ -650,10 +821,47 @@ async def _send_animation(
                         break
 
                 elif judge_review.verdict == JudgeVerdict.REJECT and judge_iteration < 2:
-                    # Full regeneration
+                    # #1 — a REJECT on TRUNCATED code is the wrong move: complete the
+                    # existing (correct) code instead of regenerating, which discards
+                    # good work and usually re-truncates. Re-judge the completed code.
+                    if looks_truncated(code):
+                        await _safe_edit(status_msg, "🧩 *Rejected code was cut off*\n_Completing it instead…_")
+                        logger.info("Judge REJECT but code is truncated — completing, not regenerating")
+                        try:
+                            completed = strip_code_fences(await complete_manim_code(
+                                code, prompt, theme_instructions=theme_prompt,
+                                scene_plan=scene_plan_json, storyboard=storyboard_text,
+                            ))
+                            if completed and "class GenScene" in completed:
+                                code = completed
+                                logger.info("Completed truncated code — re-judging")
+                                continue
+                        except Exception as e:
+                            logger.warning(f"Completion of truncated code failed (non-fatal): {e}")
+
+                    # #5 — when the same defects keep recurring (hard constraints),
+                    # regenerating the same code reproduces them. Re-plan the
+                    # STORYBOARD with those constraints (plus this verdict's issues)
+                    # as explicit MUST-NOT rules, then generate fresh code from it.
+                    if hard_constraints and storyboard_text:
+                        await _safe_edit(status_msg, "♻️ *Recurring defect*\n_Re-planning the storyboard with constraints…_")
+                        logger.info("Judge REJECT with %d recurring constraint(s) — re-planning storyboard", len(hard_constraints))
+                        try:
+                            regen_constraints = hard_constraints + list(judge_review.critical_issues[:3])
+                            sb = parse_storyboard(await generate_storyboard(
+                                prompt, lessons=top_lessons, hard_constraints=regen_constraints,
+                            ))
+                            if sb:
+                                storyboard_text = format_storyboard_for_codegen(sb)
+                                storyboard_obj = sb
+                                logger.info("Storyboard re-planned with constraints (%d beats)", len(sb.get("beats", [])))
+                        except Exception as e:
+                            logger.warning(f"Constrained storyboard re-plan failed (non-fatal): {e}")
+
+                    # Full regeneration (from the re-planned storyboard when one exists)
                     await _safe_edit(
                         status_msg,
-                        "❌ *Judge rejected*\n_Regenerating from scratch (iteration {}/2)_".format(judge_iteration)
+                        "❌ *Judge rejected*\n_Regenerating (iteration {}/2)_".format(judge_iteration)
                     )
                     logger.info(
                         f"Judge REJECT: {judge_review.regenerate_reason}, "
@@ -664,6 +872,7 @@ async def _send_animation(
                             prompt + "\n\nAVOID: " + "; ".join(judge_review.critical_issues[:3]),
                             theme_instructions=theme_prompt,
                             scene_plan=scene_plan_json,
+                            storyboard=storyboard_text,  # keep the director's plan on regen
                         )
                         if "class GenScene" not in code or "def construct" not in code:
                             logger.warning("Regenerated code missing structure, trying layout repair")
@@ -738,7 +947,7 @@ async def _send_animation(
                     if video_path and video_path.exists():
                         logger.info("Cloud render succeeded: %s", video_path)
                     else:
-                        cloud_err = cloud_render.cloud_render_last_error
+                        cloud_err = cloud_render.get_last_error()
                         logger.warning("Cloud render failed: %s", cloud_err)
                         video_path = None
                 except Exception as cloud_exc:
@@ -752,7 +961,7 @@ async def _send_animation(
                     progress_cb=_on_manim_progress,
                 )
                 render_task = asyncio.create_task(render_coro)
-                progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None, status_msg))
+                progress_task = asyncio.create_task(_progress_loop(chat_id, render_task, None))
                 try:
                     video_path = await render_task
                 except asyncio.CancelledError:
@@ -775,9 +984,9 @@ async def _send_animation(
             last_render_error = ""
             if video_path is None:
                 if cloud_available():
-                    last_render_error = cloud_render.cloud_render_last_error or "Cloud render failed"
+                    last_render_error = cloud_render.get_last_error() or "Cloud render failed"
                 else:
-                    last_render_error = render._last_error or "Local render failed"
+                    last_render_error = get_last_error() or "Local render failed"
 
             # Cloud render code errors → self-heal (same as local code errors)
             if (video_path is None and last_render_error
@@ -802,12 +1011,14 @@ async def _send_animation(
                                 break
                             # Second attempt: simplify
                             if heal_attempt == 1:
-                                error_msg = cloud_render.cloud_render_last_error or error_msg
+                                error_msg = cloud_render.get_last_error() or error_msg
                                 await _safe_edit(status_msg, "🔧 Still failing — trying a simpler version in cloud…")
                                 fixed_code = await fix_manim_code(
                                     prompt,
                                     f"Previous repair also failed. SIMPLIFY the scene: reduce object count, remove heavy updaters, fewer self.play() calls, shorter duration. Error: {error_msg}",
-                                    theme_prompt, original_code=fixed_code,
+                                    # Simplify the ORIGINAL code, not the first (failed)
+                                    # repair — repairing a repair compounds corruption.
+                                    theme_prompt, original_code=code,
                                 )
                                 if fixed_code and fixed_code.strip():
                                     fixed_code = strip_code_fences(fixed_code)
@@ -821,13 +1032,15 @@ async def _send_animation(
                     except Exception as e:
                         logger.error(f"Cloud self-heal attempt {heal_attempt} failed: {e}")
                 if video_path is None:
-                    log_error(prompt, last_render_error, code)
+                    # Log against the ORIGINAL prompt — error-pattern learning keys
+                    # on prompt_snippet, and the enhanced text is unstable/unseen.
+                    log_error(original_prompt, last_render_error, code)
 
             # Resource failures on LOCAL render (only when cloud is NOT available):
             if (video_path is None and not cloud_available()
-                    and render._last_error
-                    and classify_render_error(render._last_error) == "resource"):
-                err = render._last_error
+                    and get_last_error()
+                    and classify_render_error(get_last_error()) == "resource"):
+                err = get_last_error()
                 low = err.lower()
                 if "timed out" in low or "too heavy" in low:
                     msg = (
@@ -852,8 +1065,8 @@ async def _send_animation(
 
             # Self-healing for LOCAL render CODE errors (only when cloud is NOT available):
             if (video_path is None and not cloud_available()
-                    and render._last_error and MANIM_MAX_RETRIES > 0):
-                error_msg = render._last_error
+                    and get_last_error() and MANIM_MAX_RETRIES > 0):
+                error_msg = get_last_error()
                 if "cancelled" not in error_msg.lower():
                     for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
                         logger.info("Render failed — self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
@@ -873,13 +1086,15 @@ async def _send_animation(
                                     break
                                 # Second attempt: simplify if first repair also failed
                                 if heal_attempt == 1:
-                                    error_msg = render._last_error or error_msg
+                                    error_msg = get_last_error() or error_msg
                                     await _safe_reply(message, "🔧 Still failing — trying a simpler version…")
                                     fixed_code = await fix_manim_code(
                                         prompt,
                                         f"Previous repair also failed. SIMPLIFY the scene: reduce object count, remove heavy updaters, fewer self.play() calls, shorter duration. Error: {error_msg}",
                                         theme_prompt,
-                                        original_code=fixed_code,
+                                        # Simplify the ORIGINAL code, not the first (failed)
+                                        # repair — repairing a repair compounds corruption.
+                                        original_code=code,
                                     )
                                     if fixed_code and fixed_code.strip():
                                         fixed_code = strip_code_fences(fixed_code)
@@ -896,7 +1111,7 @@ async def _send_animation(
 
                     # Log error pattern for learning (after all self-heal attempts exhausted)
                     if video_path is None:
-                        log_error(prompt, render._last_error or "unknown", code)
+                        log_error(original_prompt, get_last_error() or "unknown", code)
 
             # Check cancellation again after self-heal
             if task.is_cancelled():
@@ -907,7 +1122,7 @@ async def _send_animation(
 
             # Deterministic fallback: never fail a user request just because generated code is brittle.
             if video_path is None:
-                error_detail = last_render_error or render._last_error or "Unknown error"
+                error_detail = last_render_error or get_last_error() or "Unknown error"
                 logger.warning("LLM render failed after repair; using deterministic fallback. Last error: %s", error_detail[:700])
                 await _safe_edit(status_msg, "🛟 Generated code was unstable, rendering a safe fallback animation instead…")
                 fallback_code = build_fallback_scene(prompt, bg_color=theme.bg_color)
@@ -925,7 +1140,7 @@ async def _send_animation(
                         code = fallback_code
                         logger.info("Cloud fallback render succeeded: %s", video_path)
                     else:
-                        cloud_err = cloud_render.cloud_render_last_error
+                        cloud_err = cloud_render.get_last_error()
                         logger.warning("Cloud fallback failed: %s", cloud_err)
                         video_path = None
                 else:
@@ -944,7 +1159,7 @@ async def _send_animation(
                         task.completed_at = datetime.now()
                         await _safe_reply(message, "❌ Render cancelled.")
                         return
-                    error_display = (last_render_error or render._last_error or error_detail or "Unknown error")[:500]
+                    error_display = (last_render_error or get_last_error() or error_detail or "Unknown error")[:500]
                     task.status = TaskStatus.FAILED
                     task.error_message = error_display
                     task.completed_at = datetime.now()
@@ -1041,7 +1256,10 @@ async def _send_animation(
             if user_voiceover and VOICEOVER_ENABLED:
                 try:
                     await bot.send_chat_action(chat_id, ChatAction.RECORD_VOICE)
-                    narration = await _generate_narration(prompt, code)
+                    narration = await _generate_narration(
+                        prompt, code,
+                        storyboard_script=storyboard_narration(storyboard_obj) if storyboard_obj else "",
+                    )
                     if narration:
                         vo_dir = Path("tmp") / "voiceover" / str(chat_id)
                         narrated = await add_voiceover(
@@ -1120,19 +1338,32 @@ async def _send_animation(
             await _safe_reply(message, f"⚠️ Animation failed: {e}")
 
 
-async def _generate_narration(prompt: str, code: str = "") -> str | None:
+async def _generate_narration(prompt: str, code: str = "", storyboard_script: str = "") -> str | None:
     """Generate TTS narration that follows the ACTUAL animation.
 
     Derived from the generated Manim code (not just the prompt) so the spoken
-    script tracks the real visual beats in order. The audio is later fit to the
-    video length, so the script should describe the animation's full arc.
+    script tracks the real visual beats in order. When a storyboard exists, its
+    per-beat narration lines (already arc-aligned) seed the script so the spoken
+    word follows the planned beats. The audio is later fit to the video length.
     """
     code_context = ""
     if code:
+        # Keep BOTH ends of long code: the tail holds the closing beats, so a plain
+        # head-only truncation would drop the ending from the narration context.
+        code_for_ctx = code if len(code) <= 6000 else (
+            code[:4000] + "\n# … (middle omitted) …\n" + code[-2000:]
+        )
         code_context = (
             "\n\nThe animation is produced by this Manim code. Narrate the visual "
             "events in the order they occur on screen:\n```python\n"
-            f"{code[:4000]}\n```"
+            f"{code_for_ctx}\n```"
+        )
+    storyboard_context = ""
+    if storyboard_script:
+        storyboard_context = (
+            "\n\nThe planned narration (one line per beat, in order) is below. Refine it "
+            "into a natural, flowing voiceover that matches the animation — keep the beat "
+            f"order and meaning:\n{storyboard_script}"
         )
     messages = [
         {
@@ -1146,7 +1377,7 @@ async def _generate_narration(prompt: str, code: str = "") -> str | None:
                 "markdown, no stage directions, no scene numbers."
             ),
         },
-        {"role": "user", "content": f"Animation request: {prompt}{code_context}"},
+        {"role": "user", "content": f"Animation request: {prompt}{storyboard_context}{code_context}"},
     ]
     try:
         text = await chat(messages)
@@ -1169,7 +1400,10 @@ async def cmd_tiktok(message: types.Message) -> None:
         return
     original_prompt = last_render["prompt"]
     await _safe_reply(message, "📱 Re-rendering in TikTok format (9:16, 25-30s)...")
-    await _send_animation(message, original_prompt, tiktok_mode=True)
+    # Pin a medium quality for the vertical format rather than inheriting the
+    # user's prior setting (e.g. -qh), which would produce a needlessly large
+    # mobile file.
+    await _send_animation(message, original_prompt, tiktok_mode=True, quality="-qm")
 
 
 
@@ -1195,7 +1429,7 @@ async def cmd_export(message: types.Message) -> None:
         await _safe_reply(message, "No animation found. Render something first!")
         return
     prompt = last_render.get("prompt", "")
-    hashtags = _generate_hashtags(prompt)
+    hashtags = _keyword_hashtags(prompt)
     caption = f"{prompt[:80]}...\n\n{hashtags}\n\nMade with @Manim_is_so_useful_bot"
     video_path = last_render.get("video_path")
     if video_path and Path(video_path).exists():
@@ -1204,8 +1438,13 @@ async def cmd_export(message: types.Message) -> None:
         await _safe_reply(message, f"TikTok-ready caption:\n\n{caption}")
 
 
-def _generate_hashtags(prompt: str) -> str:
-    """Generate relevant hashtags for TikTok/Reels export."""
+def _keyword_hashtags(prompt: str) -> str:
+    """Pick hashtags for TikTok/Reels export by keyword lookup.
+
+    Deterministic dictionary match (NOT an LLM) — it can only emit tags for the
+    topics hardcoded below, plus a generic base set. Renamed from the misleading
+    `_generate_hashtags` to reflect that it's a lookup, not generation.
+    """
     p = prompt.lower()
     base = "#MathExplained #LearnOnTikTok #STEM #Education #Animation"
     topics = {
@@ -1322,7 +1561,7 @@ async def cmd_history(message: types.Message) -> None:
             prompt = rec.get("prompt", "unknown")[:50]
             status = rec.get("status", "unknown")
             theme = rec.get("theme", "default")
-            emoji = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
+            emoji = _status_emoji(status)
             lines.append(f"{i}. {emoji} `{prompt}` — _{theme}_")
         lines.append(f"\n**Total:** {len(records)} animation(s)")
         await _safe_reply(message, "\n".join(lines))
@@ -1379,6 +1618,27 @@ async def cmd_stats(message: types.Message) -> None:
             lines.append("\n**Top Errors (24h):**")
             for err_type, count in top_errors:
                 lines.append(f"  • `{err_type}`: {count}")
+
+        # Judge-rejection memory — defects learned so they are never repeated.
+        try:
+            jr = get_judge_rejection_stats()
+            if jr["distinct_lessons"]:
+                lines.append(
+                    f"\n**Judge memory:** {jr['distinct_lessons']} lessons learned "
+                    f"({jr['total_rejections']} rejections avoided)"
+                )
+                for count, lesson in jr["top"][:3]:
+                    lines.append(f"  • ×{count} `{lesson[:60]}`")
+        except Exception:
+            pass
+
+        # Best-of-N tournament configuration status.
+        if BEST_OF_N > 1:
+            lines.append(
+                f"\n**Best-of-N:** {BEST_OF_N} candidates, "
+                f"draft quality `{BEST_OF_N_DRAFT_QUALITY}`, "
+                f"cloud {'✅' if cloud_available() else '❌'}"
+            )
 
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
@@ -1469,7 +1729,7 @@ async def cmd_quality(message: types.Message) -> None:
 
 @dp.message(Command("provider"))
 async def cmd_provider_cmd(message: types.Message) -> None:
-    """Switch LLM provider per-user: qwen or claude."""
+    """Switch LLM provider per-user: qwen, claude, or glm."""
     args = (message.text or "").replace("/provider", "", 1).strip().lower()
     chat_id = message.chat.id
     current = user_settings.get(chat_id, "provider")
@@ -1479,12 +1739,16 @@ async def cmd_provider_cmd(message: types.Message) -> None:
     elif args in ("qwen", "qwen3"):
         user_settings.set(chat_id, "provider", "qwen")
         await _safe_reply(message, "🧠 Your LLM switched to **Qwen 3.6 Plus**")
+    elif args in ("glm", "glm5", "edgefn", "baishan"):
+        user_settings.set(chat_id, "provider", "glm")
+        await _safe_reply(message, "🧠 Your LLM switched to **GLM-5.2** (Baishan EdgeFN, SOTA #5)")
     else:
         await _safe_reply(message,
             f"Your current LLM: **{current.upper()}**\n\n"
-            f"Usage: `/provider qwen` or `/provider claude`\n\n"
+            f"Usage: `/provider qwen` or `/provider claude` or `/provider glm`\n\n"
             f"• `qwen` — Qwen 3.6 Plus (fast, DashScope)\n"
-            f"• `claude` — Claude Opus 4.8 (high reasoning, Anthropic)"
+            f"• `claude` — Claude Opus 4.8 (high reasoning, Anthropic)\n"
+            f"• `glm` — GLM-5.2 (Baishan EdgeFN, SOTA #5, text-only — vision falls back to Qwen)"
         )
 
 
@@ -1928,6 +2192,12 @@ async def handle_photo(message: types.Message) -> None:
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
         photo = message.photo[-1]
+        # Guard against pathologically large images: each concurrent handler would
+        # otherwise hold the whole decoded image in RAM on an 8 GB box.
+        _MAX_PHOTO_BYTES = 12 * 1024 * 1024  # 12 MB
+        if (photo.file_size or 0) > _MAX_PHOTO_BYTES:
+            await _safe_reply(message, "🖼️ That image is too large (max 12 MB). Please send a smaller one.")
+            return
         file = await bot.get_file(photo.file_id)
         file_bytes = await bot.download_file(file.file_path)
         image_data = file_bytes.read()
@@ -1990,8 +2260,12 @@ async def handle_voice(message: types.Message) -> None:
 
         await _safe_reply(message, "🎤 Transcribing voice message...")
 
-        text = await transcribe_voice(ogg_path)
-        ogg_path.unlink(missing_ok=True)
+        # Always clean up the temp .ogg — even if transcription raises — so
+        # tmp/voice doesn't accumulate orphaned files.
+        try:
+            text = await transcribe_voice(ogg_path)
+        finally:
+            ogg_path.unlink(missing_ok=True)
 
         if text:
             await _safe_reply(message, f"📝 Recognized: _\"{text}\"_\n\nGenerating animation...")
@@ -2025,9 +2299,15 @@ async def handle_feedback_callback(callback: types.CallbackQuery) -> None:
     task_id = parts[2]
     chat_id = callback.from_user.id
 
-    # Look up task to get prompt
+    # Look up the prompt for context. The in-memory queue task may have been
+    # pruned by cleanup_old_tasks(), so fall back to the persisted DB record
+    # before giving up and logging "unknown".
     task = render_queue.get_task(task_id)
-    prompt = task.prompt if task else "unknown"
+    if task:
+        prompt = task.prompt
+    else:
+        record = db.get_render_by_task_id(task_id)
+        prompt = record.get("prompt") if record else "unknown"
 
     if direction == "up":
         log_feedback(chat_id, prompt, task_id, "thumbs_up")
@@ -2041,13 +2321,15 @@ async def handle_feedback_callback(callback: types.CallbackQuery) -> None:
 async def handle_code_callback(callback: types.CallbackQuery) -> None:
     """Show the generated code for an animation."""
     task_id = callback.data.split(":", 1)[1]
-    task = render_queue.get_task(task_id)
-    if not task:
-        await callback.answer("Task not found", show_alert=True)
-        return
 
-    # Try to get code from database first, then renderer
-    code = get_last_generated_code(callback.from_user.id)
+    # Fetch THIS task's code by id — not get_last_generated_code(), which returns
+    # whatever the user rendered most recently and would show the wrong code if a
+    # newer render overwrote the per-user cache between click and callback.
+    record = db.get_render_by_task_id(task_id)
+    code = record.get("code") if record else None
+    if not code:
+        # Fall back to the live renderer cache (e.g. before the DB row is written).
+        code = get_last_generated_code(callback.from_user.id)
     if not code:
         await callback.answer("Code not available", show_alert=True)
         return
@@ -2171,6 +2453,17 @@ async def _analytics_flush_loop():
 
 
 async def main() -> None:
+    # Fail fast (and loudly) on misconfiguration rather than at first request.
+    for problem in config.validate_config():
+        logger.warning("CONFIG: %s", problem)
+
+    # Clear stale render temp files left over from a previous process so they
+    # don't accumulate across restarts (renderer.cleanup has no internal caller).
+    try:
+        cleanup()
+    except Exception as e:
+        logger.warning("Startup render-cache cleanup failed (non-fatal): %s", e)
+
     await d1.init()
     logger.info("Starting Manim Animation Bot + AI Assistant…")
     logger.info(f"Code gen: {GPT_MODEL} (reasoning: {GPT_REASONING_EFFORT})")
@@ -2179,7 +2472,9 @@ async def main() -> None:
     logger.info(f"TTS:     {'enabled' if VOICEOVER_ENABLED else 'disabled'} ({TTS_VOICE})")
     logger.info("Polling started — waiting for messages")
 
-    # Start analytics flusher as background task (tracked for shutdown)
+    # Start analytics flusher as background task. Held both in a local (awaited in
+    # the finally below) and a module-level ref so it can never be GC'd mid-run.
+    global _analytics_task
     _analytics_task = asyncio.create_task(_analytics_flush_loop())
 
     try:
