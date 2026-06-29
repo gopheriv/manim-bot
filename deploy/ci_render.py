@@ -17,10 +17,10 @@ ROOT = Path.cwd()
 MEDIA = ROOT / "media"
 OUT = ROOT / "out"
 
-# Hard cap on the Manim render so a generated infinite loop can't pin a runner
-# until the job-level (6 hour) timeout, burning runner minutes. Overridable via
-# env for genuinely long legitimate renders.
-RENDER_TIMEOUT_S = int(os.environ.get("CI_RENDER_TIMEOUT", "1200"))  # 20 min
+# Hard cap on the Manim render so a generated infinite loop can't pin a runner.
+# Must stay <= the workflow's `timeout-minutes` (render.yml) or GitHub cancels the
+# job first. Overridable via env for genuinely long legitimate renders.
+RENDER_TIMEOUT_S = int(os.environ.get("CI_RENDER_TIMEOUT", "3600"))  # 60 min
 COMPILE_TIMEOUT_S = 60
 
 

@@ -25,6 +25,7 @@ def _beat(i, s, e, **kw):
 def _good_sb():
     return {
         "title": "T", "concept": "the one idea", "duration_target_s": 24,
+        "key_points": ["definition", "intuition", "worked example", "recap"],
         "palette": {"known": "#58C4DD", "focus": "#F5D547", "result": "#2DD4BF"},
         "beats": [_beat(1, 0, 6), _beat(2, 6, 12), _beat(3, 12, 18), _beat(4, 18, 24)],
     }
@@ -123,3 +124,53 @@ def test_scene_plan_used_when_no_storyboard():
     p = build_manim_system_prompt(prompt="x", scene_plan="LAYOUT FALLBACK",
                                   storyboard="", tier=CLOUD_CINEMATIC)
     assert "LAYOUT FALLBACK" in p
+
+
+# ── depth profiles: length + coverage scale with the chosen depth ─────────────
+
+from storyboard import build_storyboard_prompt, _DEPTH_PROFILES
+
+
+def test_depth_bands_injected_into_storyboard_prompt():
+    for depth in ("compact", "standard", "deep"):
+        p = build_storyboard_prompt(depth=depth)
+        prof = _DEPTH_PROFILES[depth]
+        assert "DEPTH & COVERAGE" in p
+        assert prof["beats"] in p          # e.g. "8-12"
+        assert prof["duration"] in p       # e.g. "60-90"
+        assert prof["key_points"] in p     # e.g. "6-9"
+
+
+def test_depth_bands_differ_by_depth():
+    compact = build_storyboard_prompt(depth="compact")
+    deep = build_storyboard_prompt(depth="deep")
+    assert "4-6" in compact and "8-12" not in compact
+    assert "8-12" in deep and "4-6" not in deep
+
+
+def test_unknown_depth_falls_back_to_standard():
+    p = build_storyboard_prompt(depth="bogus")
+    assert _DEPTH_PROFILES["standard"]["beats"] in p
+
+
+def test_key_points_surface_as_coverage_checklist():
+    sb = _good_sb()
+    sb["key_points"] = ["definition", "intuition", "worked example", "recap"]
+    spec = format_storyboard_for_codegen(sb)
+    assert "COVER EVERY POINT" in spec
+    for kp in sb["key_points"]:
+        assert f"- {kp}" in spec
+
+
+def test_validate_flags_sparse_key_points():
+    sb = _good_sb()
+    sb["key_points"] = ["only one"]
+    assert any("key_points" in i for i in validate_storyboard(sb))
+
+
+def test_validate_allows_many_beats_for_deep_topics():
+    sb = _good_sb()
+    sb["beats"] = [_beat(i, i * 6, (i + 1) * 6) for i in range(12)]  # 12 beats
+    sb["key_points"] = ["a", "b", "c", "d", "e", "f"]
+    issues = validate_storyboard(sb)
+    assert not any("is a lot" in i for i in issues)  # 12 beats no longer flagged

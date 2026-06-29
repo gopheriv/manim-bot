@@ -251,6 +251,8 @@ question while opening the next. Turn abstractions into VISUAL METAPHORS so the 
 FEELS the math — a function as a machine, a limit as a zoom, a derivative as tangent
 motion, an integral as accumulating area, a vector as a force, a matrix transforming space,
 a complex number rotating the plane, probability as flowing particles.
+Cover the topic FULLY: definition, intuition, at least one worked example, a common
+misconception or edge case, and a recap — don't stop at the headline idea.
 
 ## EQUATIONS ARE ALIVE
 Symbols move, merge, split, rearrange and morph rather than vanishing and reappearing. Use
@@ -278,7 +280,7 @@ Structure the scene logically with small, well-named helper functions; avoid dup
 name mobjects for what they represent. Keep everything deterministic (fixed seeds; no
 wall-clock or per-run randomness) so the same code always renders the same film.
 
-Aim for 5-8 well-composed visual beats with clean, varied transitions between them.
+Aim for 7-12 well-composed visual beats for rich topics (fewer only for genuinely simple asks), with clean, varied transitions between them.
 """
 
 COLOR_LANGUAGE = """## COLOR LANGUAGE — meaning, not decoration
@@ -402,12 +404,32 @@ def build_complexity_modifier(prompt: str, tier: Tier | None = None) -> str:
         elif level == "COMPLEX":
             return "## Multi-concept scene\nUp to 3 layers, 20-25 seconds. Still respect ALL hardware limits."
         return ""
-    # Capable tiers — scale ambition with complexity.
+    # Capable tiers — scale ambition (length + coverage) with complexity.
     if level == "SIMPLE":
-        return "## Simple concept\nKeep it focused (15-22s), but still beautifully composed and polished."
+        return ("## Simple concept\nKeep it focused (~30-45s, ~5 beats), beautifully composed "
+                "and polished — but still cover the idea properly: definition, intuition, a quick example.")
+    elif level == "MEDIUM":
+        return ("## Develop it\n~45-60s, 6-9 beats. Cover the key sub-points, not just the headline: "
+                "definition, intuition, a worked example, and a recap.")
     elif level == "COMPLEX":
-        return "## Multi-concept scene\nDevelop it fully: multiple coordinated beats, 25-40s, deliberate composition and camera work where it helps."
+        return ("## Multi-concept scene\nDevelop it FULLY: ~60-90s, 7-12 beats. Cover each sub-point "
+                "thoroughly — definition, intuition, derivation step(s), a worked example, a common "
+                "misconception, and a recap — with deliberate composition and camera work where it helps.")
     return ""
+
+
+def recommend_depth(prompt: str, tier: Tier | None = None) -> str:
+    """Pick a depth profile — ``"compact"`` | ``"standard"`` | ``"deep"``.
+
+    The single place the length/coverage policy lives (consumed by the storyboard
+    so all the length knobs move together). The constrained 8 GB laptop tier is
+    always ``"compact"`` — it keeps local renders short and safe; capable tiers
+    scale with the prompt's assessed complexity (COMPLEX → deep, else standard).
+    """
+    tier = tier or get_tier()
+    if tier.name == "constrained":
+        return "compact"
+    return "deep" if _assess_complexity(prompt) == "COMPLEX" else "standard"
 
 
 # ── Scene plan prompt ────────────────────────────────────────────────────────

@@ -58,6 +58,7 @@ from voiceover import add_voiceover
 from templates import get_registry
 from tiktok_integration import detect_tiktok_mode
 from prompt_builder_tiktok import get_tiktok_prompt
+from prompt_builder import recommend_depth
 from feedback import log_feedback
 import config  # module handle for startup validation (config.validate_config)
 # NOTE: the module `cloud_render` exposes a function ALSO named `cloud_render`,
@@ -540,6 +541,11 @@ async def _send_animation(
                 top_lessons = get_top_judge_lessons(limit=3)
                 hard_constraints = get_recurring_lesson_constraints(min_count=3)
 
+                # Depth profile (length + coverage) — scales with tier + prompt
+                # complexity; constrained tier stays 'compact' to keep local safe.
+                depth = recommend_depth(prompt, tier)
+                logger.info("Depth profile: %s (tier=%s)", depth, tier.name)
+
                 # ── Step 1: Direction — storyboard (cinematography IR) FIRST ──
                 # A validated beat/shot/timing/camera/narration plan becomes the
                 # authoritative spec the generator implements. Non-fatal: on any
@@ -549,7 +555,7 @@ async def _send_animation(
                     try:
                         await _safe_reply(message, "🎬 Storyboarding the shots…")
                         raw_sb = await generate_storyboard(
-                            prompt, lessons=top_lessons, hard_constraints=hard_constraints,
+                            prompt, lessons=top_lessons, hard_constraints=hard_constraints, depth=depth,
                         )
                         sb = parse_storyboard(raw_sb)
                         if sb:
@@ -849,7 +855,7 @@ async def _send_animation(
                         try:
                             regen_constraints = hard_constraints + list(judge_review.critical_issues[:3])
                             sb = parse_storyboard(await generate_storyboard(
-                                prompt, lessons=top_lessons, hard_constraints=regen_constraints,
+                                prompt, lessons=top_lessons, hard_constraints=regen_constraints, depth=depth,
                             ))
                             if sb:
                                 storyboard_text = format_storyboard_for_codegen(sb)
@@ -1259,6 +1265,7 @@ async def _send_animation(
                     narration = await _generate_narration(
                         prompt, code,
                         storyboard_script=storyboard_narration(storyboard_obj) if storyboard_obj else "",
+                        target_seconds=(storyboard_obj.get("duration_target_s") if isinstance(storyboard_obj, dict) else None),
                     )
                     if narration:
                         vo_dir = Path("tmp") / "voiceover" / str(chat_id)
@@ -1338,7 +1345,7 @@ async def _send_animation(
             await _safe_reply(message, f"⚠️ Animation failed: {e}")
 
 
-async def _generate_narration(prompt: str, code: str = "", storyboard_script: str = "") -> str | None:
+async def _generate_narration(prompt: str, code: str = "", storyboard_script: str = "", target_seconds: float | None = None) -> str | None:
     """Generate TTS narration that follows the ACTUAL animation.
 
     Derived from the generated Manim code (not just the prompt) so the spoken
@@ -1365,16 +1372,28 @@ async def _generate_narration(prompt: str, code: str = "", storyboard_script: st
             "into a natural, flowing voiceover that matches the animation — keep the beat "
             f"order and meaning:\n{storyboard_script}"
         )
+    # Length budget proportional to the video — voiceover is fit_to_video, so a
+    # longer film needs a longer script or it ends in dead silence.
+    if target_seconds and target_seconds > 0:
+        lo, hi = int(target_seconds * 1.4), int(target_seconds * 2.0)
+        length_rule = (
+            f"The video is about {int(target_seconds)} seconds, so write roughly {lo}-{hi} words "
+            "(spoken pace ~1.5-2 words/sec) — enough to narrate every beat with no long silences. "
+            "PRESERVE the detail of the planned narration above; do NOT compress it to a couple of sentences."
+        )
+    else:
+        length_rule = (
+            "Make it proportional to the animation — a few sentences for a short clip, more for a "
+            "longer one — narrating each beat without dead silence."
+        )
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a narrator for short mathematical animations. Write a narration "
-                "that walks through what appears on screen, in order, guiding the viewer's "
-                "eye ('first…', 'then…', 'notice how…'). Explain the WHY, not just the WHAT. "
-                "Keep it concise (about 2-5 sentences, 35-90 words depending on the "
-                "animation's length and complexity). Output ONLY the narration text — no "
-                "markdown, no stage directions, no scene numbers."
+                "You are a narrator for mathematical animations. Walk through what appears on "
+                "screen, in order, guiding the viewer's eye ('first…', 'then…', 'notice how…'). "
+                "Explain the WHY, not just the WHAT. " + length_rule + " Output ONLY the narration "
+                "text — no markdown, no stage directions, no scene numbers."
             ),
         },
         {"role": "user", "content": f"Animation request: {prompt}{storyboard_context}{code_context}"},

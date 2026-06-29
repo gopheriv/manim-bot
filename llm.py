@@ -368,22 +368,26 @@ async def generate_storyboard(
     prompt: str,
     lessons: list[str] | None = None,
     hard_constraints: list[str] | None = None,
+    depth: str = "standard",
 ) -> str:
     """Generate a cinematography storyboard (JSON IR) for a request.
 
     Uses the reasoning-on code-gen path: temporal/spatial/narrative planning is
     exactly where chain-of-thought helps. Returns raw JSON text (caller parses).
+    ``depth`` ('compact'|'standard'|'deep') sets the length/coverage bands.
     Recurring Judge lessons (and hard constraints) are injected into the director
     system prompt so defects are designed out at the planning stage.
     """
     try:
         messages = [
-            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints)},
+            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints, depth=depth)},
             {"role": "user", "content": f"Storyboard this animation request: {prompt}"},
         ]
         # Reuse the thinking-on completion (with non-thinking fallback) — the
-        # output is JSON, but the planning benefits from reasoning.
-        content = await _codegen_complete(messages, max_tokens=4096, timeout=180)
+        # output is JSON, but the planning benefits from reasoning. A deep
+        # storyboard (key_points + more beats + richer narration) is longer, so
+        # give it more headroom.
+        content = await _codegen_complete(messages, max_tokens=8192, timeout=180)
         return (content or "").strip()
     except Exception as e:
         logger.error(f"Storyboard generation error: {e}")

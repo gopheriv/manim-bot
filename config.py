@@ -122,7 +122,7 @@ MANIM_FPS = _getint("MANIM_FPS", 0)  # 0 = use the tier's fps; >0 forces a value
 # to 24576: storyboard-driven generation (multiple beats) plus reasoning tokens
 # were exceeding 16384 and getting cut off — truncation was the single largest
 # cause of Judge rejections.
-MANIM_MAX_OUTPUT_TOKENS = _getint("MANIM_MAX_OUTPUT_TOKENS", 24576)
+MANIM_MAX_OUTPUT_TOKENS = _getint("MANIM_MAX_OUTPUT_TOKENS", 32768)
 # Enable Qwen "thinking" for the creative code-gen task. Safeguarded in llm.py:
 # if a thinking response returns no content, it retries with thinking disabled.
 MANIM_ENABLE_THINKING = _getbool("MANIM_ENABLE_THINKING", True)
@@ -158,7 +158,7 @@ CLOUD_RENDER_ENABLED = _getbool("CLOUD_RENDER_ENABLED", False)
 CLOUD_RENDER_REPO = _get("CLOUD_RENDER_REPO", "")          # e.g. "gopheriv/manim-render-worker"
 CLOUD_RENDER_WORKFLOW = _get("CLOUD_RENDER_WORKFLOW", "render.yml")
 CLOUD_RENDER_BRANCH = _get("CLOUD_RENDER_BRANCH", "main")
-CLOUD_RENDER_TIMEOUT = _getint("CLOUD_RENDER_TIMEOUT", 1200)  # seconds to await a cloud job
+CLOUD_RENDER_TIMEOUT = _getint("CLOUD_RENDER_TIMEOUT", 3600)  # seconds to await a cloud job (60 min — long/deep renders)
 CLOUD_RENDER_POLL = _getint("CLOUD_RENDER_POLL", 10)         # seconds between status polls
 
 # ── Queue / Concurrency ─────────────────────────────────────────────────────
