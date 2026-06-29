@@ -440,9 +440,12 @@ async def _send_animation(
 
                 # Slow path: full LLM code generation
                 format_label = "📱 TikTok (9:16)" if tiktok_mode else f"🎨 Theme: **{theme.name}**"
+                # Show cloud quality when cloud is available, otherwise local quality
+                display_quality = get_cloud_quality() if cloud_available() else user_quality
+                render_target = "☁️ cloud (1080p/60fps)" if cloud_available() else "💻 local"
                 await _safe_reply(message, (
                     f"🤖 Generating Manim code with **{GPT_MODEL}**…\n"
-                    f"{format_label} | Quality: `{user_quality}`"
+                    f"{format_label} | Quality: `{display_quality}` | Render: {render_target}"
                 ))
 
                 # Build theme/format-specific prompt
