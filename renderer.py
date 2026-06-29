@@ -382,18 +382,7 @@ async def _validate_python(scene_file: Path) -> str | None:
         stderr=asyncio.subprocess.PIPE,
         creationflags=0x08000000,
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await proc.wait()
-        except Exception:
-            pass
-        return "Python validation timed out (py_compile hung)"
+    stdout, stderr = await proc.communicate()
     if proc.returncode == 0:
         return None
     output = (stderr or stdout).decode("utf-8", errors="replace")

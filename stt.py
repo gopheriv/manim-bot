@@ -51,21 +51,7 @@ async def transcribe_voice(ogg_path: Path) -> str | None:
             stderr=asyncio.subprocess.PIPE,
             creationflags=0x08000000,
         )
-        try:
-            # Bound the conversion — a malformed/huge OGG must not hang the
-            # voice-message handler indefinitely (ffmpeg can block on bad input).
-            await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
-            logger.warning("OGG→WAV conversion timed out — killing ffmpeg")
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            try:
-                await proc.wait()
-            except Exception:
-                pass
-            return None
+        await proc.communicate()
         if proc.returncode != 0:
             logger.warning("OGG→WAV conversion failed")
             return None
