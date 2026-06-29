@@ -69,7 +69,7 @@ def _cfg(monkeypatch):
     monkeypatch.setattr(cr, "CLOUD_RENDER_REPO", "owner/worker")
     monkeypatch.setattr(cr, "CLOUD_RENDER_POLL", 0)
     monkeypatch.setattr(cr, "CLOUD_RENDER_TIMEOUT", 5)
-    monkeypatch.setattr(cr, "_worker_synced", False)  # reset per-process sync cache
+    monkeypatch.setattr(cr, "_worker_synced_at", 0.0)  # reset per-process sync cache
 
 
 def test_dispatch_requires_repo(monkeypatch):

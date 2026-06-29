@@ -11,23 +11,34 @@ can act on.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import imageio_ffmpeg
 
+from common import CREATE_NO_WINDOW, parse_llm_json
 from config import VISION_PROVIDER, VISUAL_CRITIC_KEYFRAMES
 from llm import chat_with_images
-from voiceover import _get_duration  # reuse the ffprobe/ffmpeg duration helper
+from voiceover import get_duration  # reuse the ffprobe/ffmpeg duration helper
 
 logger = logging.getLogger("visual_critic")
 
-FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-CREATE_NO_WINDOW = 0x08000000
+
+def _resolve_ffmpeg() -> str:
+    """ffmpeg path via imageio-ffmpeg, falling back to a PATH lookup.
+
+    Avoids a hard import-time failure if imageio_ffmpeg can't locate a binary.
+    """
+    try:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:  # pragma: no cover - environment dependent
+        logger.warning("imageio_ffmpeg unavailable (%s) — falling back to 'ffmpeg' on PATH", e)
+        return "ffmpeg"
+
+
+FFMPEG = _resolve_ffmpeg()
 
 
 @dataclass
@@ -87,8 +98,13 @@ async def extract_keyframes(video_path: Path | str, n: int | None = None) -> lis
     """Extract N evenly-spaced keyframes (as JPEG bytes) across the video."""
     n = n or VISUAL_CRITIC_KEYFRAMES
     video_path = Path(video_path)
-    dur = await _get_duration(video_path)
-    if dur <= 0:
+    # get_duration is async here, but tolerate a sync implementation returning a
+    # plain float so a future refactor of voiceover can't break us with a
+    # "can't await a float" TypeError.
+    dur = get_duration(video_path)
+    if asyncio.iscoroutine(dur):
+        dur = await dur
+    if not dur or dur <= 0:
         dur = 12.0
     frames: list[bytes] = []
     for i in range(n):
@@ -97,24 +113,6 @@ async def extract_keyframes(video_path: Path | str, n: int | None = None) -> lis
         if data:
             frames.append(data)
     return frames
-
-
-def _parse_json(raw: str) -> dict | None:
-    if not raw:
-        return None
-    text = re.sub(r"^```[a-z]*\n?", "", raw.strip(), flags=re.MULTILINE)
-    text = re.sub(r"\n?```$", "", text.strip(), flags=re.MULTILINE)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # Try to salvage the first JSON object in the text
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                return None
-        return None
 
 
 async def critique_render(video_path: Path | str, prompt: str, code: str = "") -> VisualVerdict | None:
@@ -135,10 +133,13 @@ async def critique_render(video_path: Path | str, prompt: str, code: str = "") -
     try:
         raw = await chat_with_images(frames, caption, provider=VISION_PROVIDER)
     except Exception as e:
-        logger.warning("Visual critic vision call failed (non-fatal): %s", e)
+        # Non-fatal by design (visual critique is an optional quality pass), but
+        # log with a traceback so a broken vision provider is diagnosable rather
+        # than silently disabling all quality checks.
+        logger.warning("Visual critic vision call failed (non-fatal): %s", e, exc_info=True)
         return None
 
-    data = _parse_json(raw)
+    data = parse_llm_json(raw)
     if not data:
         logger.warning("Visual critic returned unparseable verdict: %s", (raw or "")[:200])
         return None

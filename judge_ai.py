@@ -21,14 +21,14 @@ Design (deliberately narrow):
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
+from common import parse_llm_json
 from config import (
     JUDGE_API_KEY,
     JUDGE_BASE_URL,
@@ -39,7 +39,11 @@ from config import (
     CLAUDE_API_KEY,
     QWEN_API_KEY,
 )
-from critic_agent import CriticReview
+
+if TYPE_CHECKING:
+    # Type-only import: avoids a hard runtime dependency on critic_agent. If that
+    # module has an import error, judge_ai must still load and gate code.
+    from critic_agent import CriticReview
 
 logger = logging.getLogger(__name__)
 
@@ -99,16 +103,20 @@ You are NOT the code generator and NOT a style critic. Other systems already han
 
 Review ONLY for defects a careful second reader can catch that would make the render WRONG or BROKEN:
 
-1. Runtime-breaking API misuse — calling Manim methods/classes that do not exist in manim CE, wrong or invalid keyword arguments, wrong argument order/types, removed numpy APIs (np.float, np.int, np.bool, np.math), or animating/Transforming mobjects that were never added or are incompatible.
+1. Runtime-breaking API misuse — calling Manim methods/classes that do not exist in manim CE, wrong or invalid keyword arguments, wrong argument order/types, removed numpy APIs (np.float, np.int, np.bool, np.math), or animating/Transforming mobjects that were never added or are incompatible. SPECIFICALLY: `interpolate_color()`, `color_gradient()`, and `average_color()` require ManimColor objects, not bare hex strings — if COOL/WARM/color_stops are defined as plain strings like "#3498db" and passed to these functions, that WILL crash at runtime (AttributeError: 'str' object has no attribute 'interpolate'). Flag it.
 2. Undefined names / use-before-assignment that a direct read of the code reveals.
 3. Mathematical or conceptual errors — incorrect formulas, sign errors, wrong/mislabeled axes, or a visualization that misrepresents the concept the prompt asked for.
 
 OUT OF SCOPE (never flag these): performance, Surface/ParametricSurface, ThreeDScene, number of updaters/self.play calls, fps, font_size, overlap/spacing, palette/contrast, magic numbers, dead code, or missing class scaffolding. The current render tier "{tier_name}" governs scene heaviness; heavy operations are {'ALLOWED' if allow_heavy else 'handled automatically by the renderer'} and must NOT be flagged here.
 
-Verdicts:
+Verdicts (STRONGLY prefer REPAIR — REJECT is a last resort):
 - ACCEPT (score >= 7.0): no correctness defects. Style and heaviness are irrelevant to you.
-- REPAIR (score 4.0-6.9): specific, fixable correctness defects. Give exact "Line N: do X instead of Y" instructions.
-- REJECT (score < 4.0): the code cannot represent the requested concept correctly even with line-level fixes.
+- REPAIR (score 4.0-6.9): specific, fixable correctness defects. Give exact "Line N: do X instead of Y" instructions. ALSO use REPAIR when the code is fundamentally sound but INCOMPLETE — cut off mid-scene, missing a requested feature, or otherwise unfinished. Incomplete-but-correct code is REPAIRABLE (complete it / add the missing piece); it is NOT a reason to throw the work away.
+- REJECT (score < 4.0): RESERVED for code whose APPROACH is fundamentally wrong — it represents the wrong concept, uses the wrong mathematics, or is so misconceived that no line-level fix or completion could rescue it. If correct code is merely truncated or missing features, that is REPAIR, NOT REJECT.
+
+A correct-but-incomplete script that just needs finishing or one more element must NEVER be REJECTed — regenerating it from scratch usually reproduces the same gap. Default to REPAIR whenever line-level fixes (including "complete the unfinished scene") could plausibly work.
+
+If the code appears truncated (ends mid-statement, an open bracket/call is never closed, the scene clearly stops early), say so in regenerate_reason/repair_instructions and verdict REPAIR with the instruction to COMPLETE the code.
 
 Return ONLY valid JSON, no markdown fences:
 {{"verdict": "ACCEPT" | "REPAIR" | "REJECT", "score": N.N, "critical_issues": ["defect with line reference"], "repair_instructions": ["Line N: ..."], "regenerate_reason": "why REJECT, else empty"}}
@@ -187,16 +195,40 @@ async def _judge_complete(system_prompt: str, user_message: str) -> str:
             return response.strip()
         if hasattr(response, "choices"):
             return (response.choices[0].message.content or "").strip()
-        return (response.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        if isinstance(response, dict):
+            return (response.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        # Unexpected response shape — raise so the retry/fail-closed path engages
+        # rather than returning "" and silently degrading to REPAIR.
+        raise RuntimeError(f"Unexpected judge response type: {type(response).__name__}")
 
     raise RuntimeError("No judge model configured (set CLAUDE_API_KEY or JUDGE_BASE_URL/JUDGE_API_KEY)")
 
 
+def _safe_float(value, default: float) -> float:
+    """Coerce a model-supplied score to float; never raise on garbage."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_review(content: str) -> JudgeReview:
-    """Parse the judge JSON. Unknown/garbled verdict → conservative REPAIR."""
-    content = re.sub(r"^```[a-z]*\n?", "", content, flags=re.MULTILINE)
-    content = re.sub(r"\n?```$", "", content, flags=re.MULTILINE)
-    result = json.loads(content)
+    """Parse the judge JSON. Unknown/garbled verdict → conservative REPAIR.
+
+    Fail-closed on malformed output: an unparseable response (or a non-numeric
+    score) must never crash the review or silently ACCEPT — it becomes REPAIR.
+    """
+    result = parse_llm_json(content)
+    if result is None:
+        logger.warning(
+            "Judge returned unparseable JSON — treating as REPAIR: %s",
+            (content or "")[:200],
+        )
+        return JudgeReview(
+            verdict=JudgeVerdict.REPAIR,
+            score=5.0,
+            regenerate_reason="Judge response was not valid JSON.",
+        )
 
     verdict_str = str(result.get("verdict", "")).upper()
     try:
@@ -210,11 +242,11 @@ def _parse_review(content: str) -> JudgeReview:
 
     return JudgeReview(
         verdict=verdict,
-        score=float(result.get("score", 5.0)),
-        critical_issues=list(result.get("critical_issues", [])),
-        warnings=list(result.get("warnings", [])),
-        repair_instructions=list(result.get("repair_instructions", [])),
-        regenerate_reason=str(result.get("regenerate_reason", "")),
+        score=_safe_float(result.get("score", 5.0), 5.0),
+        critical_issues=list(result.get("critical_issues", []) or []),
+        warnings=list(result.get("warnings", []) or []),
+        repair_instructions=list(result.get("repair_instructions", []) or []),
+        regenerate_reason=str(result.get("regenerate_reason", "") or ""),
     )
 
 
@@ -294,10 +326,9 @@ async def repair_by_judge(
     theme_instructions: str = "",
 ) -> str:
     """Ask the generator to fix ONLY the correctness defects the Judge found."""
-    import importlib
+    import llm  # local import keeps module load order simple; no llm→judge_ai cycle
 
-    llm_mod = importlib.import_module("llm")
-    strip_code_fences = llm_mod.strip_code_fences
+    strip_code_fences = llm.strip_code_fences
 
     repair_text = "\n".join(f"- {i}" for i in judge_review.repair_instructions) or "\n".join(
         f"- {i}" for i in judge_review.critical_issues
@@ -316,16 +347,16 @@ async def repair_by_judge(
             "role": "user",
             "content": (
                 f"Original request: {original_prompt}\n\n"
-                # Full code (generous guard) — a 4000-char cap could hide the very
-                # line the Judge's "Line N: …" instruction points at.
-                f"Current code:\n```python\n{manim_code[:12000]}\n```\n\n"
+                # Send the full code unless it is pathologically large — a cap
+                # could hide the very line the Judge's "Line N: …" points at.
+                f"Current code:\n```python\n{manim_code[:40000]}\n```\n\n"
                 f"Judge found {len(judge_review.critical_issues)} correctness issue(s):\n"
                 + "\n".join(f"- {i}" for i in judge_review.critical_issues)
             ),
         },
     ]
 
-    content = await llm_mod._codegen_complete(messages, timeout=180)
+    content = await llm._codegen_complete(messages, timeout=180)
     code = strip_code_fences(content)
     logger.info("Code repaired by generator (%d Judge fixes)", len(judge_review.repair_instructions))
     return code

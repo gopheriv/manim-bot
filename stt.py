@@ -49,7 +49,7 @@ async def transcribe_voice(ogg_path: Path) -> str | None:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         await proc.communicate()
         if proc.returncode != 0:
