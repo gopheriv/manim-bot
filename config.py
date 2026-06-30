@@ -142,6 +142,37 @@ STORYBOARD_ENABLED = _getbool("STORYBOARD_ENABLED", True)
 # (or disabled) simply adds nothing and the pipeline behaves as before.
 VISUAL_METAPHORS_ENABLED = _getbool("VISUAL_METAPHORS_ENABLED", True)
 
+# Character narrator (experimental, opt-in): a minimal Pi-creature-style guide built
+# from Manim CE primitives and injected into the code-gen prompt as a verbatim helper
+# class (so the cloud worker needs no extra dependency). OFF by default — a hand-built
+# character can read as rough, so it only activates when BOTH this flag is set AND the
+# prompt explicitly asks for a guide/teacher/character (see pi_creature.wants_character).
+CHARACTER_NARRATOR_ENABLED = _getbool("CHARACTER_NARRATOR_ENABLED", False)
+
+# Plan→compiler fast path (experimental, opt-in): the LLM emits a STRICT JSON plan
+# (plan_schema) which a deterministic, non-LLM compiler (plan_compiler) turns into
+# guaranteed-safe Manim code for common layouts. OFF by default — it trades visual
+# ambition for reproducibility/safety, and falls back to normal LLM code-gen whenever
+# the plan doesn't fully validate. Highest-reliability path when enabled.
+PLAN_COMPILER_ENABLED = _getbool("PLAN_COMPILER_ENABLED", False)
+
+
+def _get_id_set(*keys: str) -> frozenset[int]:
+    """Parse comma/semicolon-separated Telegram ids from one or more env keys."""
+    ids: set[int] = set()
+    for key in keys:
+        for part in _get(key).replace(";", ",").split(","):
+            part = part.strip()
+            if part.lstrip("-").isdigit():
+                ids.add(int(part))
+    return frozenset(ids)
+
+
+# Owner/admin chat ids allowed to use privileged commands (e.g. /restart). Accepts
+# a comma-separated ADMIN_CHAT_IDS and also reuses WATCHDOG_NOTIFY_CHAT (already the
+# owner's chat for restart notifications). Empty → privileged commands are disabled.
+ADMIN_CHAT_IDS = _get_id_set("ADMIN_CHAT_IDS", "WATCHDOG_NOTIFY_CHAT")
+
 # Best-of-N tournament: generate N candidates, render drafts in parallel on the
 # cloud farm, vision-rank the ACTUAL frames, and keep the best. 1 = disabled
 # (single candidate, today's behavior). Only activates when the cloud farm is

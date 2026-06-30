@@ -260,6 +260,70 @@ _REGISTRY: tuple[Metaphor, ...] = (
             "nest(4, outer)"
         ),
     ),
+    Metaphor(
+        name="secant_to_tangent",
+        concept="the derivative as the limit of a secant slope as dx shrinks to zero",
+        triggers=("secant", "difference", "quotient", "dx", "dy", "limit", "approach"),
+        visual="a secant through two points collapses onto the tangent as the gap dx -> 0",
+        why="the derivative is BORN as a limit, not asserted — the viewer watches the average "
+            "rate of change (rise/run over dx) tighten into the instantaneous slope f'(x).",
+        recipe=(
+            "ax = Axes(x_range=[-1, 5], y_range=[-1, 9])\n"
+            "f = lambda x: 0.5 * x**2\n"
+            "graph = ax.plot(f, color=BLUE)\n"
+            "x0, dx = 1.0, ValueTracker(2.0)  # P fixed at x0; shrink dx so Q slides into P\n"
+            "slope_group = always_redraw(lambda: ax.get_secant_slope_group(\n"
+            "    x=x0, graph=graph, dx=dx.get_value(), include_secant_line=True,\n"
+            "    secant_line_color=YELLOW, dx_line_color=RED, dy_line_color=GREEN, secant_line_length=8))\n"
+            "slope = DecimalNumber(0, num_decimal_places=2, color=YELLOW).to_corner(UR)\n"
+            "slope.add_updater(lambda m: m.set_value((f(x0 + dx.get_value()) - f(x0)) / dx.get_value()))\n"
+            "self.play(Create(ax), Create(graph))\n"
+            "self.add(slope_group, slope)\n"
+            "self.play(dx.animate.set_value(0.05), run_time=4)  # secant slope -> f'(x0): the derivative"
+        ),
+    ),
+    Metaphor(
+        name="embedding_vector",
+        concept="meaning or data encoded as a vector (a point/direction) in a feature space",
+        triggers=("embedding", "latent", "feature", "token", "semantic", "represent"),
+        visual="a word becomes a column of numbers, then an arrow pointing somewhere in space",
+        why="'embedding' stops being jargon — a symbol turns into coordinates, so 'similar "
+            "meanings are nearby' becomes a SPATIAL fact you can see, not a definition.",
+        recipe=(
+            "word = Text('king', font_size=48, color=YELLOW)\n"
+            "self.play(Write(word))\n"
+            "# Encode the word as a fixed-length vector of numbers (its embedding):\n"
+            "vals = [0.8, -0.3, 0.5, 0.1]  # deterministic stand-in for learned coordinates\n"
+            "vec = Matrix([[v] for v in vals]).scale(0.8).next_to(word, DOWN, buff=0.8)\n"
+            "self.play(TransformFromCopy(word, vec))\n"
+            "# Show it as a direction in space (first two coordinates projected onto a plane):\n"
+            "plane = NumberPlane(x_range=[-1, 1], y_range=[-1, 1]).scale(1.5).to_edge(RIGHT)\n"
+            "arrow = Arrow(plane.c2p(0, 0), plane.c2p(vals[0], vals[1]), buff=0, color=YELLOW)\n"
+            "self.play(Create(plane), GrowArrow(arrow))  # nearby words point in nearby directions"
+        ),
+    ),
+    Metaphor(
+        name="number_line_walk",
+        concept="arithmetic, sequences and modular math as hops along a line or around a clock",
+        triggers=("modular", "modulo", "remainder", "arithmetic", "sequence", "clock", "congruen"),
+        visual="a dot hops in fixed steps along a number line, wrapping back around for modulo",
+        why="addition and modular arithmetic become MOTION — each step is a hop, and 'mod n' is "
+            "the dot wrapping around, so remainders and cycles are seen instead of computed.",
+        recipe=(
+            "nl = NumberLine(x_range=[0, 12, 1], length=10, include_numbers=True)\n"
+            "self.play(Create(nl))\n"
+            "dot = Dot(nl.n2p(0), color=YELLOW)\n"
+            "self.add(dot)\n"
+            "# Hop in steps of 5, wrapping mod 12 (the modular 'clock'):\n"
+            "pos = 0\n"
+            "for _ in range(5):\n"
+            "    nxt = (pos + 5) % 12\n"
+            "    arc = ArcBetweenPoints(nl.n2p(pos), nl.n2p(nxt), angle=-PI / 2)\n"
+            "    self.play(MoveAlongPath(dot, arc), run_time=0.6)  # one hop\n"
+            "    pos = nxt\n"
+            "# For a true clock, place the same ticks around a Circle and hop along its arcs."
+        ),
+    ),
 )
 
 

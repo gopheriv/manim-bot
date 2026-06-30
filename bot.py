@@ -4,6 +4,7 @@ edge-tts voiceover, themes, queue management, rate limiting, and D1 caching."""
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -37,13 +38,18 @@ from config import (
     VISUAL_CRITIC_MAX_PASSES,
     STORYBOARD_ENABLED,
     VISUAL_METAPHORS_ENABLED,
+    CHARACTER_NARRATOR_ENABLED,
+    PLAN_COMPILER_ENABLED,
+    ADMIN_CHAT_IDS,
     BEST_OF_N,
     BEST_OF_N_DRAFT_QUALITY,
 )
 from database import db
 from fallback_scene import build_fallback_scene
-from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, complete_manim_code, generate_scene_plan, generate_storyboard, repair_layout, repair_targeted, edit_manim_code, strip_code_fences, fill_template_config
-from common import looks_truncated
+from code_safety import validate_code_safety
+from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, complete_manim_code, generate_scene_plan, generate_storyboard, generate_animation_plan, repair_layout, repair_targeted, edit_manim_code, strip_code_fences, fill_template_config
+from common import looks_truncated, parse_llm_json
+from plan_compiler import compile_plan
 from scene_planner import parse_scene_plan, format_plan_for_prompt
 from storyboard import parse_storyboard, validate_storyboard, format_storyboard_for_codegen, storyboard_narration
 from best_of_n import select_best_code
@@ -61,6 +67,8 @@ from tiktok_integration import detect_tiktok_mode
 from prompt_builder_tiktok import get_tiktok_prompt
 from prompt_builder import recommend_depth
 from visual_metaphors import recommend_metaphors, format_metaphors_for_director, format_metaphors_for_codegen
+from pi_creature import wants_character, format_character_helper
+from domain_guidance import recommend_domain, format_domain_guidance
 from feedback import log_feedback
 import config  # module handle for startup validation (config.validate_config)
 # NOTE: the module `cloud_render` exposes a function ALSO named `cloud_render`,
@@ -560,6 +568,22 @@ async def _send_animation(
                         metaphor_recipes = format_metaphors_for_codegen(metaphors)
                         logger.info("Visual metaphors: %s", ", ".join(m.name for m in metaphors))
 
+                # Character narrator (opt-in, experimental): inject the Pi-creature helper
+                # class verbatim ONLY when enabled AND the prompt asks for a guide/teacher/
+                # character. Off by default → empty string → no-op (today's behavior).
+                character_helper = ""
+                if CHARACTER_NARRATOR_ENABLED and wants_character(prompt):
+                    character_helper = format_character_helper()
+                    logger.info("Character narrator: enabled for this prompt")
+
+                # Domain-specific generation guidance (linear algebra, calculus, physics,
+                # …): concise field conventions injected into code-gen. Empty when the
+                # prompt matches no domain → no-op (today's behavior).
+                domain = recommend_domain(prompt)
+                domain_guidance = format_domain_guidance(domain)
+                if domain:
+                    logger.info("Domain guidance: %s", domain)
+
                 # ── Step 1: Direction — storyboard (cinematography IR) FIRST ──
                 # A validated beat/shot/timing/camera/narration plan becomes the
                 # authoritative spec the generator implements. Non-fatal: on any
@@ -633,8 +657,26 @@ async def _send_animation(
                     except Exception as e:
                         logger.warning(f"Best-of-N tournament failed (non-fatal, falling back): {e}")
 
+                # Step 2.5: Plan→compiler fast path (experimental, opt-in, off by
+                # default). The LLM emits a STRICT JSON plan that a deterministic,
+                # non-LLM compiler turns into guaranteed-safe Manim code. Any failure
+                # (or a plan that doesn't fully validate) falls through to LLM code-gen.
+                if not code and PLAN_COMPILER_ENABLED:
+                    try:
+                        raw_plan = await generate_animation_plan(prompt, theme_instructions=theme_prompt)
+                        plan = parse_llm_json(raw_plan)
+                        compiled = compile_plan(plan, bg_color=theme.bg_color) if plan else None
+                        if compiled:
+                            code = compiled
+                            logger.info("Plan compiler produced deterministic code (%d objects)",
+                                        len(plan.get("objects", [])))
+                        else:
+                            logger.info("Plan didn't fully validate — falling back to LLM code-gen")
+                    except Exception as e:
+                        logger.warning(f"Plan compiler path failed (non-fatal, falling back): {e}")
+
                 # Step 3: Generate code with the storyboard (or layout plan) context
-                # (only runs if best-of-N didn't already produce code)
+                # (only runs if best-of-N / plan-compiler didn't already produce code)
                 if not code:
                     for attempt in range(1, GPT_MAX_RETRIES + 1):
                         try:
@@ -643,6 +685,8 @@ async def _send_animation(
                                 prompt, theme_instructions=theme_prompt,
                                 scene_plan=scene_plan_json, storyboard=storyboard_text,
                                 metaphor_recipes=metaphor_recipes,
+                                character_helper=character_helper,
+                                domain_guidance=domain_guidance,
                             )
                             if code and code.strip():
                                 break
@@ -899,6 +943,7 @@ async def _send_animation(
                             scene_plan=scene_plan_json,
                             storyboard=storyboard_text,  # keep the director's plan on regen
                             metaphor_recipes=metaphor_recipes,
+                            domain_guidance=domain_guidance,
                         )
                         if "class GenScene" not in code or "def construct" not in code:
                             logger.warning("Regenerated code missing structure, trying layout repair")
@@ -957,6 +1002,28 @@ async def _send_animation(
                 task.add_done_callback(_background_tasks.discard)
 
             render_start = datetime.now()
+
+            # Structural guard (fail-closed): never dispatch text that isn't a scene.
+            # The edit-by-diff path can return a diff/patch ("Apply this patch…")
+            # instead of full code; without this, that prose gets sent to the cloud
+            # worker and fails with a confusing "no GenScene" after wasting a CI run.
+            # Degrade to the deterministic fallback rather than dispatch garbage.
+            if "class GenScene" not in code or "def construct" not in code:
+                logger.error("Blocked non-scene output before dispatch (missing GenScene/construct) — using fallback")
+                await _safe_edit(status_msg, "⚠️ Generated output wasn't a valid scene — rendering a safe fallback instead.")
+                code = build_fallback_scene(prompt)
+
+            # Safety gate (fail-closed): the render step EXECUTES this code, so never
+            # dispatch a scene that imports os/subprocess, calls exec/eval, or reaches
+            # for sandbox-escape dunders. Rare (the Judge vetted correctness, not
+            # safety) but this blocks prompt-injection before any render runs. The
+            # render-boundary gates (renderer.render / ci_render) are the hard backstop;
+            # here we degrade gracefully to the deterministic, known-safe fallback.
+            _code_safe, _safety_issues = validate_code_safety(code)
+            if not _code_safe:
+                logger.error("Blocked unsafe generated code: %s", "; ".join(_safety_issues))
+                await _safe_edit(status_msg, "⚠️ Generated code failed a safety check — rendering a safe fallback instead.")
+                code = build_fallback_scene(prompt)
 
             # Cloud-only mode: dispatch directly to cloud worker (16GB/4vCPU) instead
             # of rendering locally. Skips local render entirely when cloud is available.
@@ -1532,6 +1599,11 @@ def _ellipsize(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
+def _is_admin(uid: int | None) -> bool:
+    """True only for configured owner/admin chat ids (privileged commands)."""
+    return uid is not None and uid in ADMIN_CHAT_IDS
+
+
 # ---------------------------------------------------------------------------
 
 @dp.message(Command("start"))
@@ -1612,6 +1684,34 @@ async def cmd_clean(message: types.Message) -> None:
     cleanup()
     render_queue.cleanup_old_tasks()
     await _safe_answer(message, "🧹 Render cache cleaned.")
+
+
+@dp.message(Command("restart"))
+async def cmd_restart(message: types.Message) -> None:
+    """Owner-only: exit cleanly so the watchdog relaunches the bot with fresh code.
+
+    Hidden (not advertised in /start). Silently ignored for non-owners so the command
+    isn't discoverable. Requires ADMIN_CHAT_IDS (or WATCHDOG_NOTIFY_CHAT) to be set.
+    """
+    uid = message.from_user.id if message.from_user else None
+    if not _is_admin(uid):
+        return  # silent no-op for everyone else
+    await _safe_reply(message, "🔄 Restarting — back in a few seconds.")
+    logger.warning("Owner-triggered restart requested by chat_id=%s", uid)
+
+    async def _shutdown() -> None:
+        # Let the reply HTTP flush, then stop polling so main() returns and the
+        # watchdog relaunches bot.py (picking up the current code). os._exit is a
+        # hard fallback in case graceful shutdown stalls.
+        await asyncio.sleep(1.0)
+        try:
+            await dp.stop_polling()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("stop_polling during restart failed: %s", e)
+        await asyncio.sleep(5.0)
+        os._exit(0)
+
+    asyncio.create_task(_shutdown())
 
 
 @dp.message(Command("history"))

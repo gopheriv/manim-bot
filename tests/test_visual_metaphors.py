@@ -35,6 +35,26 @@ def test_inflections_match_by_prefix():
     assert any(m.name == "matrix_transform" for m in recommend_metaphors("a linear transformation of the grid"))
 
 
+# ── new metaphors (WP2: 3b1b-distilled) ────────────────────────────────────────
+
+def test_secant_metaphor_matches():
+    names = [m.name for m in recommend_metaphors(
+        "show the secant line difference quotient as dx approaches zero")]
+    assert "secant_to_tangent" in names
+
+
+def test_embedding_metaphor_matches():
+    names = [m.name for m in recommend_metaphors(
+        "what is a word embedding in a latent semantic space")]
+    assert "embedding_vector" in names
+
+
+def test_number_line_walk_matches_modular():
+    names = [m.name for m in recommend_metaphors(
+        "explain modular arithmetic and the remainder on a clock")]
+    assert "number_line_walk" in names
+
+
 def test_unrelated_prompt_returns_empty():
     assert recommend_metaphors("paint a calm sunset landscape with warm colors") == []
 

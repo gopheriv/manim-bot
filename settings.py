@@ -165,6 +165,7 @@ AVAILABLE_VOICES = [
 
 AVAILABLE_THEMES = [
     ("visual_math", "📐 Visual Math", "Premium explainer style with semantic color"),
+    ("threeblue1brown", "🔵 3Blue1Brown", "Pure black, restrained blues, serif math"),
     ("default", "🎨 Default", "Standard Manim dark theme"),
     ("nord", "🧊 Nord", "Deep slate, pastel blues, minimal"),
     ("cyberpunk", "💜 Cyberpunk", "Black, neon pink/cyan, glowing"),
