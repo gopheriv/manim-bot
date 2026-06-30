@@ -128,6 +128,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
+# Infrastructure error patterns — GitHub Actions, network, workflow issues that
+# self-heal cannot fix (no amount of code fixing helps when the runner is broken).
+_INFRA_ERROR_PATTERNS = re.compile(
+    r"node\.js\s*(20|24)|"
+    r"actions/(checkout|setup-python|upload-artifact|download-artifact)|"
+    r"workflow_dispatch|"
+    r"gh (timed out|command not found|auth)|"
+    r"no runner|runner not found|"
+    r"artifact.*(not found|download|upload)|"
+    r"rate.?limit|api rate|"
+    r"connection (refused|reset|timed out)|"
+    r"http\s*(502|503|504)|"
+    r"process completed with exit code 1.*node\.js",
+    re.IGNORECASE,
+)
+
+
+def _is_infra_error(error_msg: str) -> bool:
+    """True if the error is infrastructure (GitHub Actions, network) — not a code bug."""
+    return bool(_INFRA_ERROR_PATTERNS.search(error_msg))
+
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -944,6 +966,7 @@ async def _send_animation(
                             storyboard=storyboard_text,  # keep the director's plan on regen
                             metaphor_recipes=metaphor_recipes,
                             domain_guidance=domain_guidance,
+                            character_helper=character_helper,  # keep the narrator on regen too
                         )
                         if "class GenScene" not in code or "def construct" not in code:
                             logger.warning("Regenerated code missing structure, trying layout repair")
@@ -1081,11 +1104,12 @@ async def _send_animation(
                 else:
                     last_render_error = get_last_error() or "Local render failed"
 
-            # Cloud render code errors → self-heal (same as local code errors)
+            # Cloud render code errors → self-heal (skip infrastructure errors)
             if (video_path is None and last_render_error
                     and cloud_available()
                     and MANIM_MAX_RETRIES > 0
-                    and "cancelled" not in last_render_error.lower()):
+                    and "cancelled" not in last_render_error.lower()
+                    and not _is_infra_error(last_render_error)):
                 error_msg = last_render_error
                 for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
                     logger.info("Cloud render failed — self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
@@ -1129,6 +1153,21 @@ async def _send_animation(
                     # on prompt_snippet, and the enhanced text is unstable/unseen.
                     log_error(original_prompt, last_render_error, code)
 
+            # Infrastructure failures — skip self-heal, tell user it's not their fault:
+            if video_path is None and last_render_error and _is_infra_error(last_render_error):
+                logger.warning("Infrastructure error detected — skipping self-heal: %s", last_render_error[:200])
+                task.status = TaskStatus.FAILED
+                task.error_message = last_render_error[:500]
+                task.completed_at = datetime.now()
+                analytics.log_render_failure(chat_id, "infra_error")
+                await _safe_edit(
+                    status_msg,
+                    "⚠️ Cloud render infrastructure is temporarily down (GitHub Actions issue). "
+                    "This is NOT a code problem — no fix will help until the runner recovers. "
+                    "Try again later or switch to local rendering.",
+                )
+                return
+
             # Resource failures on LOCAL render (only when cloud is NOT available):
             if (video_path is None and not cloud_available()
                     and get_last_error()
@@ -1158,7 +1197,8 @@ async def _send_animation(
 
             # Self-healing for LOCAL render CODE errors (only when cloud is NOT available):
             if (video_path is None and not cloud_available()
-                    and get_last_error() and MANIM_MAX_RETRIES > 0):
+                    and get_last_error() and MANIM_MAX_RETRIES > 0
+                    and not _is_infra_error(get_last_error())):
                 error_msg = get_last_error()
                 if "cancelled" not in error_msg.lower():
                     for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
