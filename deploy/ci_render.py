@@ -74,7 +74,15 @@ def fail(msg: str) -> "None":
     # Flush both streams so earlier render output isn't lost when we exit(1).
     sys.stdout.flush()
     sys.stderr.flush()
-    print(f"::error::{msg}", flush=True)
+    # Print the full (possibly multi-line) detail as plain log text so the real
+    # error is ALWAYS visible in the step log.
+    print(msg, flush=True)
+    # Also emit a GitHub error annotation. The ::error:: workflow command is
+    # single-line: literal newlines must be escaped as %0A (and % as %25 first) or
+    # only the first line survives — which is exactly how a multi-line manim
+    # traceback got hidden behind a bare "exit 1".
+    annotation = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::error::{annotation}", flush=True)
     sys.stdout.flush()
     sys.exit(1)
 
@@ -116,7 +124,8 @@ def main() -> None:
     # Syntax check before the expensive render
     try:
         pc = subprocess.run([sys.executable, "-m", "py_compile", str(scene)],
-                            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=COMPILE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         fail(f"py_compile timed out after {COMPILE_TIMEOUT_S}s")
     if pc.returncode != 0:
@@ -126,12 +135,28 @@ def main() -> None:
            str(scene), "GenScene"]
     print("Running:", " ".join(cmd), flush=True)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=RENDER_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
+        # encoding/errors pinned so capturing manim's output (which includes
+        # Unicode progress glyphs) can never itself crash on a non-UTF-8 locale and
+        # swallow the real error. ubuntu-latest is UTF-8, so this is a no-op there.
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=RENDER_TIMEOUT_S)
+    except subprocess.TimeoutExpired as e:
+        # Surface whatever manim emitted before we killed it — the tail usually
+        # points at the scene/loop that hung.
+        partial = (e.stdout or "") + (e.stderr or "")
+        if partial.strip():
+            print("----- manim output (before timeout) -----", flush=True)
+            print(partial, flush=True)
         fail(f"manim render timed out after {RENDER_TIMEOUT_S}s "
              "(likely an infinite loop in the generated scene)")
     if r.returncode != 0:
-        fail(f"manim render failed (exit {r.returncode}):\n{_tail(r.stderr or r.stdout, 2000)}")
+        # Echo manim's FULL output so the REAL error (NameError, LaTeX failure,
+        # missing mobject, …) is visible in the log — not just a bare "exit 1".
+        print("----- manim stdout -----", flush=True)
+        print(r.stdout or "(empty)", flush=True)
+        print("----- manim stderr -----", flush=True)
+        print(r.stderr or "(empty)", flush=True)
+        fail(f"manim render failed (exit {r.returncode}) — see the manim output above")
 
     mp4s = sorted((MEDIA / "videos").rglob("GenScene.mp4"),
                   key=lambda p: p.stat().st_size, reverse=True)
