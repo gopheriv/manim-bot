@@ -35,6 +35,7 @@ Output ONLY valid JSON (no markdown fences) with EXACTLY this shape:
 {
   "title": "short title",
   "concept": "the ONE idea the viewer should understand by the end",
+  "key_points": ["ordered sub-ideas the film MUST cover: definition, intuition, derivation step(s), worked example, common misconception/edge case, recap"],
   "duration_target_s": 30,
   "palette": {"known": "#hex", "focus": "#hex", "result": "#hex", "transform": "#hex", "bg": "#hex"},
   "beats": [
@@ -49,34 +50,65 @@ Output ONLY valid JSON (no markdown fences) with EXACTLY this shape:
       "camera": "hold | push in on <target> | pan to follow <target> | pull back to reveal <scale> — name the target AND the reason",
       "transition_in": "how this beat enters from the previous (e.g. ReplacementTransform the equation, FadeTransform, GrowFromCenter)",
       "emphasis": "where the viewer's eye should land",
-      "narration": "the exact spoken line for this beat (1 sentence, conversational)"
+      "covers": ["which key_point(s) from the top-level list this beat realizes"],
+      "narration": "1-3 sentences that actually TEACH this point, conversational"
     }
   ]
 }
 
 Rules:
-- 4-7 beats. Clear narrative arc: hook → build → insight → resolution.
-- Timings are contiguous and monotonic (each beat's start_s == previous end_s); total ≈ duration_target_s (20-45s, longer when the idea earns it).
+- Beat count, duration, and key-point coverage: follow the DEPTH & COVERAGE block below. Clear educational arc: hook → define → build intuition → derive → worked example → address a misconception → recap — don't stop at the headline idea; the beats must collectively cover EVERY key point.
+- Timings are contiguous and monotonic (each beat's start_s == previous end_s); total ≈ duration_target_s (see the DEPTH & COVERAGE block).
 - Use color SEMANTICALLY and consistently: each concept keeps its palette role across beats.
 - Every camera move must name a target and a reason; prefer "hold" unless a move serves the idea.
 - Prefer MORPHING/transform between related forms over fade-and-replace.
-- Each beat: a purpose, a concrete implementable action, and one narration sentence.
+- Each beat: a purpose, a concrete implementable action, and 1-3 narration sentences that teach the point.
 - Reveal progressively — never dump everything in beat 1.
 - Keep each beat implementable in Manim CE (real objects, real animations)."""
+
+
+# Depth profiles — the length/coverage bands per depth (set by recommend_depth).
+_DEPTH_PROFILES = {
+    "compact":  {"beats": "4-6",  "duration": "25-40", "key_points": "3-4"},
+    "standard": {"beats": "6-9",  "duration": "40-60", "key_points": "4-6"},
+    "deep":     {"beats": "8-12", "duration": "60-90", "key_points": "6-9"},
+}
 
 
 def build_storyboard_prompt(
     lessons: list[str] | None = None,
     hard_constraints: list[str] | None = None,
+    depth: str = "standard",
+    metaphor_menu: str = "",
 ) -> str:
     """Build the director system prompt, optionally seeded with learned lessons.
 
+    ``depth`` (``compact`` | ``standard`` | ``deep``, from ``recommend_depth``)
+    selects the length/coverage bands — beat count, duration, and number of
+    key points — so longer, denser films are requested for richer topics.
+    ``metaphor_menu`` (from ``visual_metaphors.format_metaphors_for_director``)
+    offers curated teaching metaphors for the director to pick a spine from.
     ``lessons`` are recurring Judge-rejection defects injected at the PLANNING
     stage (so the director designs around them, instead of them being buried in a
     code-gen footer). ``hard_constraints`` are lessons that have recurred enough
     times to become non-negotiable MUST rules — surfaced most prominently.
     """
     sections = [STORYBOARD_SYSTEM_PROMPT]
+
+    profile = _DEPTH_PROFILES.get(depth, _DEPTH_PROFILES["standard"])
+    sections.append(
+        "## DEPTH & COVERAGE\n"
+        f"- Beats: {profile['beats']} (use more for richer topics).\n"
+        f"- duration_target_s: {profile['duration']} seconds.\n"
+        f"- key_points: list {profile['key_points']} ordered sub-ideas the film MUST cover "
+        "(definition → intuition → derivation step(s) → worked example → common misconception/edge case "
+        "→ recap), and design the beats so they collectively realize EVERY one. "
+        "Don't stop at the headline idea — teach the whole topic at this depth."
+    )
+
+    # Teaching-metaphor palette — a spine for the explainer (chosen by the director).
+    if metaphor_menu:
+        sections.append(metaphor_menu)
 
     if hard_constraints:
         rules = "\n".join(f"- {c}" for c in hard_constraints)
@@ -123,6 +155,16 @@ def parse_storyboard(raw: str) -> dict[str, Any] | None:
             logger.warning("Storyboard beat %d missing fields: %s", i, missing)
             return None
 
+    # Coerce duration_target_s to a number: the LLM sometimes quotes it
+    # ("30"), which would skip validation's isinstance check and raise a
+    # TypeError in the downstream narration length budget (str > int).
+    dt = sb.get("duration_target_s")
+    if isinstance(dt, str):
+        try:
+            sb["duration_target_s"] = float(dt) if "." in dt else int(dt)
+        except ValueError:
+            sb.pop("duration_target_s", None)
+
     return sb
 
 
@@ -138,9 +180,14 @@ def validate_storyboard(sb: dict[str, Any]) -> list[str]:
     beats = sb.get("beats", [])
 
     if len(beats) < 3:
-        issues.append(f"Only {len(beats)} beats — an explainer needs a hook→build→insight→resolution arc (4-7 beats).")
-    if len(beats) > 9:
-        issues.append(f"{len(beats)} beats is a lot — consider merging; aim for 4-7 well-composed beats.")
+        issues.append(f"Only {len(beats)} beats — an explainer needs a hook→build→insight→resolution arc (more beats for a deeper topic).")
+    if len(beats) > 14:
+        issues.append(f"{len(beats)} beats is a lot even for a deep topic — consider merging closely-related beats.")
+
+    # Coverage: a detailed explainer should enumerate the sub-ideas it teaches.
+    key_points = sb.get("key_points")
+    if not isinstance(key_points, list) or len(key_points) < 3:
+        issues.append("Few/no key_points listed — a detailed explainer should name the ordered sub-ideas it covers (definition, intuition, example, recap…).")
 
     # Timeline coherence: monotonic, roughly contiguous, total near target.
     prev_end = None
@@ -204,6 +251,11 @@ def format_storyboard_for_codegen(sb: dict[str, Any]) -> str:
     lines.append("## STORYBOARD — implement EXACTLY, beat by beat (this is the director's plan)")
     if sb.get("concept"):
         lines.append(f"Concept (what the viewer must understand): {sb['concept']}")
+    key_points = sb.get("key_points")
+    if isinstance(key_points, list) and key_points:
+        lines.append("COVER EVERY POINT (the beats must collectively teach all of these):")
+        for kp in key_points:
+            lines.append(f"  - {kp}")
     if sb.get("duration_target_s"):
         lines.append(f"Target duration: ~{sb['duration_target_s']}s — set run_time/wait so the beats hit these timings.")
     palette = sb.get("palette")
@@ -226,6 +278,11 @@ def format_storyboard_for_codegen(sb: dict[str, Any]) -> str:
             lines.append(f"  camera: {b['camera']}")
         if b.get("emphasis"):
             lines.append(f"  emphasis: {b['emphasis']}")
+        covers = b.get("covers")
+        if covers:
+            # Which top-level key_point(s) this beat realizes — forward the
+            # director's coverage map so the generator teaches every sub-idea.
+            lines.append(f"  covers: {', '.join(map(str, covers)) if isinstance(covers, list) else covers}")
         if b.get("narration"):
             lines.append(f"  narration: \"{b['narration']}\"")
         lines.append("")

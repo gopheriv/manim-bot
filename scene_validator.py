@@ -26,6 +26,9 @@ def validate_layout(code: str) -> list[str]:
     issues.extend(_check_simultaneous_center(code))
     issues.extend(_check_missing_arrange(code))
     issues.extend(_check_zero_buff_next_to(code))
+    issues.extend(_check_stale_copy(code))
+    issues.extend(_check_section_cleanup(code))
+    issues.extend(_check_long_construct(code))
 
     return issues
 
@@ -150,6 +153,63 @@ def _check_missing_arrange(code: str) -> list[str]:
                     f"VGroup with {len(elements)} elements but no .arrange() call. "
                     f"Use .arrange() to distribute elements with proper spacing."
                 ]
+    return []
+
+
+def _check_stale_copy(code: str) -> list[str]:
+    """Detect `x = obj.copy()` results that are never FadeOut/Transform'd.
+
+    A leftover `.copy()` sits on top of its original and reads as a doubled object.
+    Only flags when 2+ copies are abandoned (a single tracked copy is usually fine).
+    """
+    copies = re.findall(r"(\w+)\s*=\s*\w+\s*\.\s*copy\s*\(\s*\)", code)
+    stale = []
+    for var in dict.fromkeys(copies):  # de-dupe, keep order
+        removed = re.search(
+            rf"\b(FadeOut|Uncreate|Transform|ReplacementTransform|FadeTransform)\s*\([^)]*\b{re.escape(var)}\b",
+            code,
+        )
+        if not removed:
+            stale.append(var)
+    if len(stale) >= 2:
+        return [
+            f"{len(stale)} .copy() result(s) ({', '.join(stale)}) are never FadeOut/Transform'd — "
+            f"leftover duplicates sit on their originals. Fade or transform them, or don't copy."
+        ]
+    return []
+
+
+def _check_section_cleanup(code: str) -> list[str]:
+    """Detect comment-delimited sections that don't clear before the next one."""
+    lines = code.split("\n")
+    section_idx = [
+        i for i, ln in enumerate(lines)
+        if re.match(r"\s*#.*(={3,}|\bSCENE\b|\bSection\b|\bPart\b)", ln, re.IGNORECASE)
+    ]
+    if len(section_idx) < 2:
+        return []
+    missing = 0
+    for a, b in zip(section_idx, section_idx[1:]):
+        between = "\n".join(lines[a:b])
+        if not re.search(r"\b(FadeOut|Uncreate)\b|self\.clear\s*\(", between):
+            missing += 1
+    if missing:
+        return [
+            f"{missing} comment-delimited section(s) end without a FadeOut/clear — objects "
+            f"carry into the next section and overlap. Clear each section before the next."
+        ]
+    return []
+
+
+def _check_long_construct(code: str) -> list[str]:
+    """Detect a long construct() with many plays but no teardown at all."""
+    play_calls = len(re.findall(r"self\.play\s*\(", code))
+    has_teardown = bool(re.search(r"\b(FadeOut|Uncreate)\b|self\.clear\s*\(", code))
+    if play_calls > 25 and not has_teardown:
+        return [
+            f"{play_calls} self.play() calls with no FadeOut/clear anywhere — a long scene that "
+            f"never tears down accumulates objects. Clear between sections to keep frames readable."
+        ]
     return []
 
 

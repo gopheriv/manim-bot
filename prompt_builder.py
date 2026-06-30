@@ -240,10 +240,15 @@ disclosure. Use the WHOLE frame; don't cluster at the origin or leave half the f
 for more than ~2s.
 
 ## CAMERA — part of the storytelling
-Prefer `class GenScene(MovingCameraScene):` and direct the camera with intent —
-`self.camera.frame.animate.scale(...)` / `.move_to(...)` to push in on the decisive moment,
-follow motion, frame a detail, or pull back to reveal scale. Every camera move must have a
-reason; no aimless drift. (Use `ThreeDScene` instead only when the concept is genuinely 3D.)
+Prefer `class GenScene(MovingCameraScene):` and direct the camera with intent; every move
+must have a reason — push in on the decisive moment, follow motion, frame a detail, or pull
+back to reveal scale. No aimless drift. Concrete idiom for a push-in and release:
+`self.camera.frame.save_state()` →
+`self.play(self.camera.frame.animate.scale(0.5).move_to(target))` → hold on the detail →
+`self.play(Restore(self.camera.frame))` to return to the full composition.
+For genuinely 3D concepts use `class GenScene(ThreeDScene):` and orbit with
+`self.move_camera(phi=70*DEGREES, theta=-45*DEGREES, run_time=3)`; PIN HUD text/labels so they
+don't tumble with the scene: `self.add_fixed_in_frame_mobjects(label)`.
 
 ## EDUCATIONAL STORYTELLING — build intuition, don't dump the answer
 Reveal step by step and create anticipation: each beat answers the viewer's current
@@ -251,11 +256,21 @@ question while opening the next. Turn abstractions into VISUAL METAPHORS so the 
 FEELS the math — a function as a machine, a limit as a zoom, a derivative as tangent
 motion, an integral as accumulating area, a vector as a force, a matrix transforming space,
 a complex number rotating the plane, probability as flowing particles.
+Cover the topic FULLY: definition, intuition, at least one worked example, a common
+misconception or edge case, and a recap — don't stop at the headline idea.
 
-## EQUATIONS ARE ALIVE
-Symbols move, merge, split, rearrange and morph rather than vanishing and reappearing. Use
-`TransformMatchingTex` extensively so a term visibly travels from one line to the next.
-Reuse and MOVE/reshape objects instead of deleting and recreating them.
+## EQUATIONS ARE ALIVE — concrete idioms
+Symbols move, merge, split and morph rather than vanishing and reappearing — reuse and
+reshape objects instead of deleting and recreating them. Build equations so their parts are
+addressable, then animate them with these idioms:
+- BUILD addressable: `eq = MathTex(r"a^2 + b^2 = c^2", substrings_to_isolate=["a", "b", "c"])`
+  so each symbol is its own submobject you can color, move and target.
+- MORPH line to line: `self.play(TransformMatchingTex(eq_a, eq_b))` so shared terms visibly
+  travel from one line to the next instead of fading out and back in.
+- ISOLATE a subterm: dim the whole equation, then relight just the focus —
+  `self.play(eq.animate.set_opacity(0.3))` then `self.play(eq[idx].animate.set_opacity(1.0))`.
+- SPAWN a term from another (show where it came from):
+  `self.play(TransformFromCopy(src[k], dst[j]))` — the new symbol grows out of its source.
 
 ## RICH, PROGRESSIVE DIAGRAMS — never minimal
 Build axes, grids, labels, callouts, highlight regions, dynamic arrows, measurements,
@@ -278,7 +293,7 @@ Structure the scene logically with small, well-named helper functions; avoid dup
 name mobjects for what they represent. Keep everything deterministic (fixed seeds; no
 wall-clock or per-run randomness) so the same code always renders the same film.
 
-Aim for 5-8 well-composed visual beats with clean, varied transitions between them.
+Aim for 7-12 well-composed visual beats for rich topics (fewer only for genuinely simple asks), with clean, varied transitions between them.
 """
 
 COLOR_LANGUAGE = """## COLOR LANGUAGE — meaning, not decoration
@@ -287,6 +302,10 @@ scene — a concept keeps its color in equations, graphs, vectors and labels. De
 - blue = known / given          - red = contradiction / warning
 - yellow = current focus         - purple = auxiliary / construction
 - green = result / conclusion    - orange = transformation in progress
+CONCRETE RULE — one symbol, one color everywhere: define a tex-to-color map ONCE and pass it
+to EVERY `MathTex`/`Tex` so a symbol carries the same color through every line and graph —
+`t2c = {"x": BLUE, "s": YELLOW, "f": GREEN}` then `MathTex(r"f(x)=s", tex_to_color_map=t2c)`;
+reuse those SAME colors for the matching axes, vectors and labels.
 Stay within this palette plus neutrals (white/grey for axes, labels, structure). Do not
 introduce extra hues outside these roles — a limited, consistent palette reads as designed;
 a rainbow reads as noise. Honor the active VISUAL THEME's palette when one is provided.
@@ -402,12 +421,35 @@ def build_complexity_modifier(prompt: str, tier: Tier | None = None) -> str:
         elif level == "COMPLEX":
             return "## Multi-concept scene\nUp to 3 layers, 20-25 seconds. Still respect ALL hardware limits."
         return ""
-    # Capable tiers — scale ambition with complexity.
+    # Capable tiers — scale ambition (length + coverage) with complexity.
+    # SIMPLE and MEDIUM share the "standard" depth (see recommend_depth), so their
+    # length bands MUST match — otherwise this footer (~5 beats) would contradict
+    # the authoritative storyboard (6-9 beats) inside the very same code-gen prompt.
     if level == "SIMPLE":
-        return "## Simple concept\nKeep it focused (15-22s), but still beautifully composed and polished."
+        return ("## Simple concept\nKeep it focused but teach it fully (~40-60s, 6-9 beats), "
+                "beautifully composed and polished: definition, intuition, a worked example, and a recap.")
+    elif level == "MEDIUM":
+        return ("## Develop it\n~45-60s, 6-9 beats. Cover the key sub-points, not just the headline: "
+                "definition, intuition, a worked example, and a recap.")
     elif level == "COMPLEX":
-        return "## Multi-concept scene\nDevelop it fully: multiple coordinated beats, 25-40s, deliberate composition and camera work where it helps."
+        return ("## Multi-concept scene\nDevelop it FULLY: ~60-90s, 7-12 beats. Cover each sub-point "
+                "thoroughly — definition, intuition, derivation step(s), a worked example, a common "
+                "misconception, and a recap — with deliberate composition and camera work where it helps.")
     return ""
+
+
+def recommend_depth(prompt: str, tier: Tier | None = None) -> str:
+    """Pick a depth profile — ``"compact"`` | ``"standard"`` | ``"deep"``.
+
+    The single place the length/coverage policy lives (consumed by the storyboard
+    so all the length knobs move together). The constrained 8 GB laptop tier is
+    always ``"compact"`` — it keeps local renders short and safe; capable tiers
+    scale with the prompt's assessed complexity (COMPLEX → deep, else standard).
+    """
+    tier = tier or get_tier()
+    if tier.name == "constrained":
+        return "compact"
+    return "deep" if _assess_complexity(prompt) == "COMPLEX" else "standard"
 
 
 # ── Scene plan prompt ────────────────────────────────────────────────────────
@@ -449,12 +491,21 @@ def build_manim_system_prompt(
     scene_plan: str = "",
     tier: Tier | None = None,
     storyboard: str = "",
+    metaphor_recipes: str = "",
+    character_helper: str = "",
+    domain_guidance: str = "",
 ) -> str:
     """Build the tier-aware system prompt for code generation.
 
     When a ``storyboard`` (cinematography IR) is supplied it is the AUTHORITATIVE
     plan the generator must implement beat-by-beat; the lighter ``scene_plan``
     layout is only used as a fallback when there is no storyboard.
+    ``metaphor_recipes`` (from ``visual_metaphors.format_metaphors_for_codegen``)
+    supplies concrete Manim CE patterns for the storyboard's chosen metaphor.
+    ``character_helper`` (from ``pi_creature.format_character_helper``) is the opt-in
+    narrator class, injected verbatim only when the feature is enabled and requested.
+    ``domain_guidance`` (from ``domain_guidance.format_domain_guidance``) adds concise
+    field-specific rules (linear algebra, calculus, physics, …) when the prompt matches.
     """
     tier = tier or get_tier()
     sections = [BASE_MANIM_RULES]
@@ -468,6 +519,15 @@ def build_manim_system_prompt(
         sections.append(storyboard)
     elif scene_plan:
         sections.append(f"## Scene Layout\n{scene_plan}")
+    # Field-specific generation rules (e.g. linear algebra → basis vectors first).
+    if domain_guidance:
+        sections.append(domain_guidance)
+    # Concrete recipes for the metaphor the plan committed to (implementable idioms).
+    if metaphor_recipes:
+        sections.append(metaphor_recipes)
+    # Opt-in character narrator helper (verbatim class for the generator to embed).
+    if character_helper:
+        sections.append(character_helper)
     if theme_instructions:
         sections.append(theme_instructions)
     return "\n\n".join(sections)

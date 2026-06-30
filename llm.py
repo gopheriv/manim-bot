@@ -34,6 +34,7 @@ from prompt_builder import (
     build_layout_repair_prompt,
 )
 from storyboard import build_storyboard_prompt
+from plan_schema import build_plan_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -191,11 +192,11 @@ async def _codegen_complete(messages: list[dict], max_tokens: int | None = None,
 
 # ── Manim code generation (GPT-5.5) ─────────────────────────────────────────
 
-async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "", storyboard: str = "") -> str:
+async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "", storyboard: str = "", metaphor_recipes: str = "", character_helper: str = "", domain_guidance: str = "") -> str:
     """Generate Manim animation code (Qwen 3.7 Max, reasoning ON, large output)."""
     try:
         messages = [
-            {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan, storyboard=storyboard)},
+            {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan, storyboard=storyboard, metaphor_recipes=metaphor_recipes, character_helper=character_helper, domain_guidance=domain_guidance)},
             {"role": "user", "content": prompt},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
@@ -282,7 +283,10 @@ async def edit_manim_code(
         "requested change and keep everything else exactly as it is — same concept, "
         "objects, composition, colors and timing except where the change requires "
         "otherwise. Keep the class named GenScene with a construct method. "
-        "Output ONLY the complete updated Python code — no explanation, no markdown fences."
+        "Output ONLY the complete updated Python code — no explanation, no markdown fences. "
+        "CRITICAL: return the ENTIRE script from the first import to the last line, "
+        "reproducing unchanged parts verbatim. NEVER output a diff, a patch, a "
+        "'apply this change' snippet, or only the edited lines — always the whole file."
     )
     if theme_instructions:
         system += "\n\n" + theme_instructions
@@ -368,25 +372,49 @@ async def generate_storyboard(
     prompt: str,
     lessons: list[str] | None = None,
     hard_constraints: list[str] | None = None,
+    depth: str = "standard",
+    metaphor_menu: str = "",
 ) -> str:
     """Generate a cinematography storyboard (JSON IR) for a request.
 
     Uses the reasoning-on code-gen path: temporal/spatial/narrative planning is
     exactly where chain-of-thought helps. Returns raw JSON text (caller parses).
-    Recurring Judge lessons (and hard constraints) are injected into the director
-    system prompt so defects are designed out at the planning stage.
+    ``depth`` ('compact'|'standard'|'deep') sets the length/coverage bands.
+    ``metaphor_menu`` offers curated teaching metaphors for the director to pick a
+    spine from. Recurring Judge lessons (and hard constraints) are injected into
+    the director system prompt so defects are designed out at the planning stage.
     """
     try:
         messages = [
-            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints)},
+            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints, depth=depth, metaphor_menu=metaphor_menu)},
             {"role": "user", "content": f"Storyboard this animation request: {prompt}"},
         ]
         # Reuse the thinking-on completion (with non-thinking fallback) — the
-        # output is JSON, but the planning benefits from reasoning.
-        content = await _codegen_complete(messages, max_tokens=4096, timeout=180)
+        # output is JSON, but the planning benefits from reasoning. A deep
+        # storyboard (key_points + more beats + richer narration) is longer, so
+        # give it more headroom.
+        content = await _codegen_complete(messages, max_tokens=8192, timeout=180)
         return (content or "").strip()
     except Exception as e:
         logger.error(f"Storyboard generation error: {e}")
+        raise
+
+
+async def generate_animation_plan(prompt: str, theme_instructions: str = "") -> str:
+    """Generate a STRICT, compilable plan (JSON IR) for the plan→compiler path.
+
+    Returns raw JSON text (caller parses + validates + compiles deterministically).
+    Reasoning-on like the storyboard: laying out objects/zones/beats benefits from it.
+    """
+    try:
+        messages = [
+            {"role": "system", "content": build_plan_prompt(theme_instructions)},
+            {"role": "user", "content": f"Plan this animation request as JSON: {prompt}"},
+        ]
+        content = await _codegen_complete(messages, max_tokens=4096, timeout=180)
+        return (content or "").strip()
+    except Exception as e:
+        logger.error(f"Animation plan generation error: {e}")
         raise
 
 

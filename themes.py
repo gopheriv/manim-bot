@@ -113,18 +113,41 @@ DEFAULT = Theme(
     colors=["#58C4DD", "#FFFF00", "#83C167", "#FC6255", "#FFFFFF"],
 )
 
+THREE_BLUE_ONE_BROWN = Theme(
+    name="3Blue1Brown",
+    bg_color="#000000",
+    palette_desc=(
+        "Use a 3Blue1Brown-style palette on a pure black background (#000000): a restrained "
+        "range of blues — deep blue (#1C758A) for primary objects and bright blue (#29ABCA) "
+        "for objects undergoing a transformation — with a single warm accent, yellow "
+        "(#FFFF00), for the current focus, green (#83C167) for results and conclusions, and "
+        "red (#FC6255) reserved for contrast or warnings. Text and structure in near-white "
+        "(#ECECEC). The feel is calm, precise, and concept-driven."
+    ),
+    extra_instructions=(
+        "Computer-Modern / serif feel: use Tex/MathTex for ALL mathematics (LaTeX's Computer "
+        "Modern font is what gives this look its character). Thin near-white axes and guide "
+        "lines (stroke_width=2). Keep to restrained blues with a single warm accent; pure "
+        "black background. Use color semantically — a symbol keeps its color across every "
+        "equation, graph, vector, and label. Evoke the high-end mathematical-explainer style "
+        "without copying any specific creator's logo, assets, watermark, or exact scenes."
+    ),
+    colors=["#1C758A", "#FFFF00", "#29ABCA", "#FC6255", "#ECECEC"],
+)
+
 
 # ── Theme Registry ───────────────────────────────────────────────────────────
 
 ALL_THEMES: dict[str, Theme] = {
     "visual_math": VISUAL_MATH,
+    "threeblue1brown": THREE_BLUE_ONE_BROWN,
     "default": DEFAULT,
     "nord": NORD,
     "cyberpunk": CYBERPUNK,
     "chalkboard": CHALKBOARD,
 }
 
-THEME_ORDER = ["visual_math", "default", "nord", "cyberpunk", "chalkboard"]
+THEME_ORDER = ["visual_math", "threeblue1brown", "default", "nord", "cyberpunk", "chalkboard"]
 
 
 def get_theme(name: str) -> Theme:

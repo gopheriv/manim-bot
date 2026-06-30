@@ -845,5 +845,27 @@
     "Status": "Re-Pass",
     "Test Result / Notes": "Re-architecture pillar #2 (highest visible quality jump). New module best_of_n.py (118 lines); bot.py wiring (Step 2 in pipeline, gated + graceful fallback); config BEST_OF_N + BEST_OF_N_DRAFT_QUALITY; /stats surfaces tournament config. tests/test_best_of_n.py (11): picks highest score, all-gen-fail → None, all-render-fail → unranked, partial gen failure, scoring failure, n clamp, invalid code filtered. Suite 138/138; bot imports clean.",
     "Severity": "Enhancement"
+  },
+  {
+    "ID": "F78",
+    "Category": "Pipeline",
+    "Feature": "Adaptive length & depth (longer, denser explainers)",
+    "Trigger": "Any animation request (generation pipeline)",
+    "User Story": "As a viewer, a rich topic gets a longer (up to ~90s), information-dense explainer that covers every key sub-point (definition, intuition, derivation, worked example, misconception, recap), while a trivial ask stays short and my 8 GB laptop renders stay modest and safe.",
+    "Expected Behaviour": "recommend_depth(prompt, tier) -> compact|standard|deep (constrained tier ALWAYS compact; capable tiers: COMPLEX->deep, else standard). Depth threads into the storyboard: build_storyboard_prompt(depth) injects a DEPTH & COVERAGE block (beats 4-6/6-9/8-12, duration 25-40/40-60/60-90s, key_points 3-4/4-6/6-9). The IR gains a top-level key_points list (surfaced as a COVER EVERY POINT checklist) + 1-3 teaching sentences of narration per beat. build_complexity_modifier and CINEMATIC_STYLE request 7-12 beats and full coverage on capable tiers. Narration is sized to the video (~1.5-2 words/sec from the storyboard's duration_target_s) and preserves the detailed script. Capacity raised so longer != truncated/under-reviewed: code-gen tokens 24576->32768, Judge reviews 16000 chars (was 6000). Constrained 8 GB tier keeps compact/short and its weight-threshold/downgrade behavior.",
+    "Status": "Re-Pass",
+    "Test Result / Notes": "Plan 'Longer, more information-dense animations'. prompt_builder (recommend_depth, scaled complexity modifier, CINEMATIC_STYLE 7-12 beats + cover-fully); storyboard (_DEPTH_PROFILES, key_points field+checklist, parameterized prompt, validate upper-bound 14 + key_points note); llm.generate_storyboard(depth=, max_tokens 8192); bot (depth selection + thread to both storyboard calls, narration sizing); config MANIM_MAX_OUTPUT_TOKENS 32768; judge_ai code window 16000. Tests: depth bands/key_points (test_storyboard) + recommend_depth/scaled durations (test_prompt_complexity). Suite 160/160; bot imports clean.",
+    "Severity": "Enhancement"
+  },
+  {
+    "ID": "F79",
+    "Category": "Pipeline",
+    "Feature": "Visual Metaphor Library (teaching-metaphor vocabulary)",
+    "Trigger": "Any animation request whose prompt invites a known teaching metaphor (derivative→tangent, integral→area, matrix→warping grid, …); VISUAL_METAPHORS_ENABLED.",
+    "User Story": "As a viewer, abstract math is taught through a concrete, well-built visual metaphor (a function as an input→output machine, a derivative as a sliding tangent, a matrix as a warping grid) instead of a generically-prompted improvisation, so I FEEL the idea.",
+    "Expected Behaviour": "recommend_metaphors(prompt) word-prefix-matches the prompt against a curated registry of 12 metaphors (function_machine, derivative_tangent, integral_area, limit_zoom, matrix_transform, complex_rotation, vector_field_flow, eigen_directions, series_convergence, probability_particles, graph_search, recursion_nesting), ranks by distinct triggers hit, and returns the top 2 (deterministic; ties break by registry order). The storyboard DIRECTOR receives a menu (name + why) to pick ONE spine metaphor; the code GENERATOR receives the concrete Manim CE recipe for the chosen metaphor(s). Threaded through generate_storyboard(metaphor_menu=) and generate_manim_code(metaphor_recipes=) on the first pass, the Judge-regen path, AND the best-of-N tournament (every candidate shares the same menu/recipes). Fully graceful: no keyword match (or VISUAL_METAPHORS_ENABLED=False) contributes nothing and the pipeline behaves exactly as before.",
+    "Status": "Pass",
+    "Test Result / Notes": "New module visual_metaphors.py (frozen Metaphor registry + prefix matcher + 2 formatters). Wired into bot.py (computed once per request; passed to storyboard + code-gen on the first pass, Judge-regen, and the best-of-N tournament via select_best_code/_gen_candidate), storyboard.build_storyboard_prompt, prompt_builder.build_manim_system_prompt, llm.generate_storyboard / generate_manim_code; config VISUAL_METAPHORS_ENABLED (default on). tests/test_visual_metaphors.py (14) + 2 best-of-N forwarding tests: match precision incl. no-substring-false-positive (paragraph≠graph), inflection prefix match, max_n bound, ranking, empty/degenerate inputs, formatter contents, registry integrity, no-ellipsis guard, and candidate/orchestrator forwarding. Full suite 179/179; import smoke confirms both prompts carry their sections and a no-match prompt is blank. NOT yet live-rendered (no Telegram/render client in env).",
+    "Severity": "Enhancement"
   }
 ]

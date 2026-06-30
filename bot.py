@@ -4,6 +4,7 @@ edge-tts voiceover, themes, queue management, rate limiting, and D1 caching."""
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -36,13 +37,19 @@ from config import (
     VISUAL_CRITIC_ENABLED,
     VISUAL_CRITIC_MAX_PASSES,
     STORYBOARD_ENABLED,
+    VISUAL_METAPHORS_ENABLED,
+    CHARACTER_NARRATOR_ENABLED,
+    PLAN_COMPILER_ENABLED,
+    ADMIN_CHAT_IDS,
     BEST_OF_N,
     BEST_OF_N_DRAFT_QUALITY,
 )
 from database import db
 from fallback_scene import build_fallback_scene
-from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, complete_manim_code, generate_scene_plan, generate_storyboard, repair_layout, repair_targeted, edit_manim_code, strip_code_fences, fill_template_config
-from common import looks_truncated
+from code_safety import validate_code_safety
+from llm import classify_intent, chat, chat_with_image, generate_manim_code, fix_manim_code, complete_manim_code, generate_scene_plan, generate_storyboard, generate_animation_plan, repair_layout, repair_targeted, edit_manim_code, strip_code_fences, fill_template_config
+from common import looks_truncated, parse_llm_json
+from plan_compiler import compile_plan
 from scene_planner import parse_scene_plan, format_plan_for_prompt
 from storyboard import parse_storyboard, validate_storyboard, format_storyboard_for_codegen, storyboard_narration
 from best_of_n import select_best_code
@@ -58,6 +65,10 @@ from voiceover import add_voiceover
 from templates import get_registry
 from tiktok_integration import detect_tiktok_mode
 from prompt_builder_tiktok import get_tiktok_prompt
+from prompt_builder import recommend_depth
+from visual_metaphors import recommend_metaphors, format_metaphors_for_director, format_metaphors_for_codegen
+from pi_creature import wants_character, format_character_helper
+from domain_guidance import recommend_domain, format_domain_guidance
 from feedback import log_feedback
 import config  # module handle for startup validation (config.validate_config)
 # NOTE: the module `cloud_render` exposes a function ALSO named `cloud_render`,
@@ -540,6 +551,39 @@ async def _send_animation(
                 top_lessons = get_top_judge_lessons(limit=3)
                 hard_constraints = get_recurring_lesson_constraints(min_count=3)
 
+                # Depth profile (length + coverage) — scales with tier + prompt
+                # complexity; constrained tier stays 'compact' to keep local safe.
+                depth = recommend_depth(prompt, tier)
+                logger.info("Depth profile: %s (tier=%s)", depth, tier.name)
+
+                # Visual metaphor library — pick the teaching metaphor(s) this prompt
+                # invites: a menu for the director (spine) + concrete Manim recipes for
+                # the generator. Empty when nothing matches → no-op (today's behavior).
+                metaphor_menu = ""
+                metaphor_recipes = ""
+                if VISUAL_METAPHORS_ENABLED:
+                    metaphors = recommend_metaphors(prompt)
+                    if metaphors:
+                        metaphor_menu = format_metaphors_for_director(metaphors)
+                        metaphor_recipes = format_metaphors_for_codegen(metaphors)
+                        logger.info("Visual metaphors: %s", ", ".join(m.name for m in metaphors))
+
+                # Character narrator (opt-in, experimental): inject the Pi-creature helper
+                # class verbatim ONLY when enabled AND the prompt asks for a guide/teacher/
+                # character. Off by default → empty string → no-op (today's behavior).
+                character_helper = ""
+                if CHARACTER_NARRATOR_ENABLED and wants_character(prompt):
+                    character_helper = format_character_helper()
+                    logger.info("Character narrator: enabled for this prompt")
+
+                # Domain-specific generation guidance (linear algebra, calculus, physics,
+                # …): concise field conventions injected into code-gen. Empty when the
+                # prompt matches no domain → no-op (today's behavior).
+                domain = recommend_domain(prompt)
+                domain_guidance = format_domain_guidance(domain)
+                if domain:
+                    logger.info("Domain guidance: %s", domain)
+
                 # ── Step 1: Direction — storyboard (cinematography IR) FIRST ──
                 # A validated beat/shot/timing/camera/narration plan becomes the
                 # authoritative spec the generator implements. Non-fatal: on any
@@ -550,6 +594,7 @@ async def _send_animation(
                         await _safe_reply(message, "🎬 Storyboarding the shots…")
                         raw_sb = await generate_storyboard(
                             prompt, lessons=top_lessons, hard_constraints=hard_constraints,
+                            depth=depth, metaphor_menu=metaphor_menu,
                         )
                         sb = parse_storyboard(raw_sb)
                         if sb:
@@ -603,6 +648,8 @@ async def _send_animation(
                             n=BEST_OF_N,
                             chat_id=chat_id,
                             draft_quality=BEST_OF_N_DRAFT_QUALITY,
+                            metaphor_menu=metaphor_menu,
+                            metaphor_recipes=metaphor_recipes,
                         )
                         if winner:
                             code = winner
@@ -610,8 +657,26 @@ async def _send_animation(
                     except Exception as e:
                         logger.warning(f"Best-of-N tournament failed (non-fatal, falling back): {e}")
 
+                # Step 2.5: Plan→compiler fast path (experimental, opt-in, off by
+                # default). The LLM emits a STRICT JSON plan that a deterministic,
+                # non-LLM compiler turns into guaranteed-safe Manim code. Any failure
+                # (or a plan that doesn't fully validate) falls through to LLM code-gen.
+                if not code and PLAN_COMPILER_ENABLED:
+                    try:
+                        raw_plan = await generate_animation_plan(prompt, theme_instructions=theme_prompt)
+                        plan = parse_llm_json(raw_plan)
+                        compiled = compile_plan(plan, bg_color=theme.bg_color) if plan else None
+                        if compiled:
+                            code = compiled
+                            logger.info("Plan compiler produced deterministic code (%d objects)",
+                                        len(plan.get("objects", [])))
+                        else:
+                            logger.info("Plan didn't fully validate — falling back to LLM code-gen")
+                    except Exception as e:
+                        logger.warning(f"Plan compiler path failed (non-fatal, falling back): {e}")
+
                 # Step 3: Generate code with the storyboard (or layout plan) context
-                # (only runs if best-of-N didn't already produce code)
+                # (only runs if best-of-N / plan-compiler didn't already produce code)
                 if not code:
                     for attempt in range(1, GPT_MAX_RETRIES + 1):
                         try:
@@ -619,6 +684,9 @@ async def _send_animation(
                             code = await generate_manim_code(
                                 prompt, theme_instructions=theme_prompt,
                                 scene_plan=scene_plan_json, storyboard=storyboard_text,
+                                metaphor_recipes=metaphor_recipes,
+                                character_helper=character_helper,
+                                domain_guidance=domain_guidance,
                             )
                             if code and code.strip():
                                 break
@@ -850,6 +918,7 @@ async def _send_animation(
                             regen_constraints = hard_constraints + list(judge_review.critical_issues[:3])
                             sb = parse_storyboard(await generate_storyboard(
                                 prompt, lessons=top_lessons, hard_constraints=regen_constraints,
+                                depth=depth, metaphor_menu=metaphor_menu,
                             ))
                             if sb:
                                 storyboard_text = format_storyboard_for_codegen(sb)
@@ -873,6 +942,8 @@ async def _send_animation(
                             theme_instructions=theme_prompt,
                             scene_plan=scene_plan_json,
                             storyboard=storyboard_text,  # keep the director's plan on regen
+                            metaphor_recipes=metaphor_recipes,
+                            domain_guidance=domain_guidance,
                         )
                         if "class GenScene" not in code or "def construct" not in code:
                             logger.warning("Regenerated code missing structure, trying layout repair")
@@ -931,6 +1002,28 @@ async def _send_animation(
                 task.add_done_callback(_background_tasks.discard)
 
             render_start = datetime.now()
+
+            # Structural guard (fail-closed): never dispatch text that isn't a scene.
+            # The edit-by-diff path can return a diff/patch ("Apply this patch…")
+            # instead of full code; without this, that prose gets sent to the cloud
+            # worker and fails with a confusing "no GenScene" after wasting a CI run.
+            # Degrade to the deterministic fallback rather than dispatch garbage.
+            if "class GenScene" not in code or "def construct" not in code:
+                logger.error("Blocked non-scene output before dispatch (missing GenScene/construct) — using fallback")
+                await _safe_edit(status_msg, "⚠️ Generated output wasn't a valid scene — rendering a safe fallback instead.")
+                code = build_fallback_scene(prompt)
+
+            # Safety gate (fail-closed): the render step EXECUTES this code, so never
+            # dispatch a scene that imports os/subprocess, calls exec/eval, or reaches
+            # for sandbox-escape dunders. Rare (the Judge vetted correctness, not
+            # safety) but this blocks prompt-injection before any render runs. The
+            # render-boundary gates (renderer.render / ci_render) are the hard backstop;
+            # here we degrade gracefully to the deterministic, known-safe fallback.
+            _code_safe, _safety_issues = validate_code_safety(code)
+            if not _code_safe:
+                logger.error("Blocked unsafe generated code: %s", "; ".join(_safety_issues))
+                await _safe_edit(status_msg, "⚠️ Generated code failed a safety check — rendering a safe fallback instead.")
+                code = build_fallback_scene(prompt)
 
             # Cloud-only mode: dispatch directly to cloud worker (16GB/4vCPU) instead
             # of rendering locally. Skips local render entirely when cloud is available.
@@ -1259,6 +1352,7 @@ async def _send_animation(
                     narration = await _generate_narration(
                         prompt, code,
                         storyboard_script=storyboard_narration(storyboard_obj) if storyboard_obj else "",
+                        target_seconds=(storyboard_obj.get("duration_target_s") if isinstance(storyboard_obj, dict) else None),
                     )
                     if narration:
                         vo_dir = Path("tmp") / "voiceover" / str(chat_id)
@@ -1338,7 +1432,7 @@ async def _send_animation(
             await _safe_reply(message, f"⚠️ Animation failed: {e}")
 
 
-async def _generate_narration(prompt: str, code: str = "", storyboard_script: str = "") -> str | None:
+async def _generate_narration(prompt: str, code: str = "", storyboard_script: str = "", target_seconds: float | None = None) -> str | None:
     """Generate TTS narration that follows the ACTUAL animation.
 
     Derived from the generated Manim code (not just the prompt) so the spoken
@@ -1365,16 +1459,33 @@ async def _generate_narration(prompt: str, code: str = "", storyboard_script: st
             "into a natural, flowing voiceover that matches the animation — keep the beat "
             f"order and meaning:\n{storyboard_script}"
         )
+    # Length budget proportional to the video — voiceover is fit_to_video, so a
+    # longer film needs a longer script or it ends in dead silence. Coerce
+    # defensively: the value originates from unvalidated LLM JSON.
+    try:
+        target_seconds = float(target_seconds) if target_seconds is not None else None
+    except (TypeError, ValueError):
+        target_seconds = None
+    if target_seconds and target_seconds > 0:
+        lo, hi = int(target_seconds * 1.4), int(target_seconds * 2.0)
+        length_rule = (
+            f"The video is about {int(target_seconds)} seconds, so write roughly {lo}-{hi} words "
+            "(spoken pace ~1.5-2 words/sec) — enough to narrate every beat with no long silences. "
+            "PRESERVE the detail of the planned narration above; do NOT compress it to a couple of sentences."
+        )
+    else:
+        length_rule = (
+            "Make it proportional to the animation — a few sentences for a short clip, more for a "
+            "longer one — narrating each beat without dead silence."
+        )
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a narrator for short mathematical animations. Write a narration "
-                "that walks through what appears on screen, in order, guiding the viewer's "
-                "eye ('first…', 'then…', 'notice how…'). Explain the WHY, not just the WHAT. "
-                "Keep it concise (about 2-5 sentences, 35-90 words depending on the "
-                "animation's length and complexity). Output ONLY the narration text — no "
-                "markdown, no stage directions, no scene numbers."
+                "You are a narrator for mathematical animations. Walk through what appears on "
+                "screen, in order, guiding the viewer's eye ('first…', 'then…', 'notice how…'). "
+                "Explain the WHY, not just the WHAT. " + length_rule + " Output ONLY the narration "
+                "text — no markdown, no stage directions, no scene numbers."
             ),
         },
         {"role": "user", "content": f"Animation request: {prompt}{storyboard_context}{code_context}"},
@@ -1399,7 +1510,7 @@ async def cmd_tiktok(message: types.Message) -> None:
         await _safe_reply(message, "No animation found. Render something first!")
         return
     original_prompt = last_render["prompt"]
-    await _safe_reply(message, "📱 Re-rendering in TikTok format (9:16, 25-30s)...")
+    await _safe_reply(message, "📱 Re-rendering in TikTok format (9:16 vertical)…")
     # Pin a medium quality for the vertical format rather than inheriting the
     # user's prior setting (e.g. -qh), which would produce a needlessly large
     # mobile file.
@@ -1430,7 +1541,7 @@ async def cmd_export(message: types.Message) -> None:
         return
     prompt = last_render.get("prompt", "")
     hashtags = _keyword_hashtags(prompt)
-    caption = f"{prompt[:80]}...\n\n{hashtags}\n\nMade with @Manim_is_so_useful_bot"
+    caption = f"{_ellipsize(prompt, 80)}\n\n{hashtags}\n\nMade with @Manim_is_so_useful_bot"
     video_path = last_render.get("video_path")
     if video_path and Path(video_path).exists():
         await message.reply_video(video=FSInputFile(video_path), caption=caption)
@@ -1468,6 +1579,31 @@ def _keyword_hashtags(prompt: str) -> str:
     return base
 
 
+# Provider id → human display name. Single source so /start and /settings can't
+# drift from the actual provider (a glm user must not be shown "Qwen").
+_PROVIDER_NAMES = {
+    "qwen": "Qwen 3.6 Plus",
+    "claude": "Claude Opus 4.8",
+    "glm": "GLM-5.2 (Baishan EdgeFN)",
+}
+
+
+def _provider_display_name(provider: str | None) -> str:
+    """Map a provider id to its display name, tolerating unknown/None."""
+    return _PROVIDER_NAMES.get((provider or "qwen").lower(), str(provider))
+
+
+def _ellipsize(text: str, limit: int) -> str:
+    """Trim to ``limit`` chars, appending '…' ONLY when it actually truncates."""
+    text = text or ""
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _is_admin(uid: int | None) -> bool:
+    """True only for configured owner/admin chat ids (privileged commands)."""
+    return uid is not None and uid in ADMIN_CHAT_IDS
+
+
 # ---------------------------------------------------------------------------
 
 @dp.message(Command("start"))
@@ -1496,7 +1632,7 @@ async def cmd_start(message: types.Message) -> None:
         register_user(chat_id)
 
     user_provider = user_settings.get(chat_id, "provider")
-    provider_name = "Claude Opus 4.8" if user_provider == "claude" else "Qwen 3.6 Plus"
+    provider_name = _provider_display_name(user_provider)
     models = (
         f"**Code gen**: `{GPT_MODEL}` (reasoning: `{GPT_REASONING_EFFORT or 'default'}`)\n"
         f"**Chat**: `{provider_name}` (`{user_provider}`)"
@@ -1509,9 +1645,11 @@ async def cmd_start(message: types.Message) -> None:
         "**Commands:**\n"
         "• Send me text → I'll classify intent automatically\n"
         "• `/animation <description>` → force animation mode\n"
-        "• `/provider` → switch chat LLM (Qwen / Claude)\n"
+        "• `/provider` → switch chat LLM (Qwen / Claude / GLM)\n"
         "• `/settings` → per-user preferences\n"
         "• `/theme` → cycle visual theme\n"
+        "• `/quality` → set render quality\n"
+        "• `/voice on|off` → toggle narration\n"
         "• `/examples` → visual math demo prompts\n"
         "• `/example <number>` → render a curated demo\n"
         "• `/code` → show last generated code\n"
@@ -1528,7 +1666,9 @@ async def cmd_start(message: types.Message) -> None:
         "• `/exam [STEP|EGE]` → exam prep mode\n"
         "• `/debate <prompt>` → two AIs compete, best wins\n"
         "• `/referral` → earn free renders by inviting friends\n"
-        "• `/teacher` → educator analytics dashboard\n\n"
+        "• `/teacher` → educator analytics dashboard\n"
+        "• `/class` → manage your students (teachers)\n"
+        "• `/reset` → revert settings to defaults\n\n"
         "Try: *Animate why matrix multiplication is function composition*"
         f"{bonus_msg}"
     ))
@@ -1544,6 +1684,34 @@ async def cmd_clean(message: types.Message) -> None:
     cleanup()
     render_queue.cleanup_old_tasks()
     await _safe_answer(message, "🧹 Render cache cleaned.")
+
+
+@dp.message(Command("restart"))
+async def cmd_restart(message: types.Message) -> None:
+    """Owner-only: exit cleanly so the watchdog relaunches the bot with fresh code.
+
+    Hidden (not advertised in /start). Silently ignored for non-owners so the command
+    isn't discoverable. Requires ADMIN_CHAT_IDS (or WATCHDOG_NOTIFY_CHAT) to be set.
+    """
+    uid = message.from_user.id if message.from_user else None
+    if not _is_admin(uid):
+        return  # silent no-op for everyone else
+    await _safe_reply(message, "🔄 Restarting — back in a few seconds.")
+    logger.warning("Owner-triggered restart requested by chat_id=%s", uid)
+
+    async def _shutdown() -> None:
+        # Let the reply HTTP flush, then stop polling so main() returns and the
+        # watchdog relaunches bot.py (picking up the current code). os._exit is a
+        # hard fallback in case graceful shutdown stalls.
+        await asyncio.sleep(1.0)
+        try:
+            await dp.stop_polling()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("stop_polling during restart failed: %s", e)
+        await asyncio.sleep(5.0)
+        os._exit(0)
+
+    asyncio.create_task(_shutdown())
 
 
 @dp.message(Command("history"))
@@ -1675,7 +1843,7 @@ async def cmd_settings(message: types.Message) -> None:
     try:
         s = user_settings.get_all(message.chat.id)
         theme = get_theme(s.get("theme", "visual_math"))
-        provider_name = "Claude Opus 4.8" if s.get("provider") == "claude" else "Qwen 3.6 Plus"
+        provider_name = _provider_display_name(s.get("provider"))
         lines = [
             "⚙️ **Your Settings**\n",
             f"**Theme:** {theme.name}",
@@ -1688,7 +1856,7 @@ async def cmd_settings(message: types.Message) -> None:
             "",
             "**Commands:**",
             "• `/theme` — cycle visual theme",
-            "• `/provider qwen|claude` — switch chat LLM",
+            "• `/provider qwen|claude|glm` — switch chat LLM",
             "• `/voice on|off` — toggle voiceover",
             "• `/quality -ql|-qm|-qh` — set render quality",
             "• `/reset` — revert to defaults",
@@ -1828,16 +1996,21 @@ async def cmd_versions(message: types.Message) -> None:
 
     lines = ["📑 **Your Last Versions:**\n"]
     for i, rec in enumerate(history, 1):
-        prompt = rec.get("prompt", "unknown")[:60]
+        prompt = _ellipsize(rec.get("prompt", "unknown"), 60)
         status = rec.get("status", "unknown")
         theme = rec.get("theme", "default")
         created = rec.get("created_at", "?")[:16]
         emoji = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
-        lines.append(f"{i}. {emoji} `{prompt}...`")
+        lines.append(f"{i}. {emoji} `{prompt}`")
         lines.append(f"   _{theme}_ | {created}")
 
     await _safe_reply(message, "\n".join(lines))
 
+
+
+# Per-chat last-generated course lessons, so a numeric reply can render a lesson
+# (the /course message tells the user to "reply with a lesson number").
+_last_course: dict[int, list] = {}
 
 
 @dp.message(Command("course"))
@@ -1848,15 +2021,19 @@ async def cmd_course(message: types.Message) -> None:
         await _safe_reply(message, "Usage: `/course <topic>`\n\nExample: `/course derivatives`")
         return
 
-    await _safe_reply(message, f"📚 Designing a course on **{args}**...")
+    await _safe_reply(message, f"📚 Designing a course on **{args}**…")
     try:
         course = await generate_course(args)
+        if not course.lessons:
+            await _safe_reply(message, f"⚠️ Couldn't design a course on _{args}_. Try a more specific topic.")
+            return
+        _last_course[message.chat.id] = course.lessons
         lines = [f"📚 **Course: {course.topic}**\n"]
         for i, lesson in enumerate(course.lessons, 1):
             level_emoji = "🟢" if lesson.level == "beginner" else "🟡" if lesson.level == "intermediate" else "🔴"
             lines.append(f"{i}. {level_emoji} **{lesson.title}** ({lesson.level})")
             lines.append(f"   _{', '.join(lesson.key_concepts[:3])}_")
-        lines.append("\nReply with a lesson number to generate that animation!")
+        lines.append(f"\nReply with a lesson number (`1`–`{len(course.lessons)}`) to render that lesson's animation!")
         await _safe_reply(message, "\n".join(lines))
     except Exception as e:
         logger.error(f"Course generation failed: {e}")
@@ -1895,23 +2072,28 @@ async def cmd_exam(message: types.Message) -> None:
     # Check for specific topic
     topic = " ".join(parts[1:]) if len(parts) > 1 else ""
 
-    if topic:
-        await _safe_reply(message, f"📝 Finding a {bank_name} question about: _{topic}_...")
-        question = await generate_animation_for_question(topic, bank_name)
-    else:
-        await _safe_reply(message, f"📝 Getting a random {bank_name} question...")
-        question = get_random_question(bank_name)
+    try:
+        if topic:
+            await _safe_reply(message, f"📝 Finding a {bank_name} question about: _{topic}_…")
+            question = await generate_animation_for_question(topic, bank_name)
+        else:
+            await _safe_reply(message, f"📝 Getting a random {bank_name} question…")
+            question = get_random_question(bank_name)
+    except Exception as e:
+        logger.error(f"Exam question lookup failed: {e}")
+        await _safe_reply(message, f"⚠️ Couldn't fetch a {bank_name} question: {e}")
+        return
 
     if not question:
         await _safe_reply(message, f"⚠️ No {bank_name} questions available.")
         return
 
-    difficulty_stars = "⭐" * (question.difficulty // 2)
+    difficulty_stars = "⭐" * (max(question.difficulty, 0) // 2)
     await _safe_reply(message, (
         f"📝 **{bank_name} {question.year}, Q{question.question_num}** {difficulty_stars}\n\n"
         f"**Topic:** {question.topic}\n"
-        f"**Question:** {question.question_text[:200]}...\n\n"
-        f"🎬 Generating animation..."
+        f"**Question:** {_ellipsize(question.question_text, 200)}\n\n"
+        f"🎬 Generating animation…"
     ))
     is_3d = any(w in question.animation_prompt.lower() for w in ("3d", "three-dimensional"))
     await _send_animation(message, question.animation_prompt, is_3d=is_3d)
@@ -1994,7 +2176,12 @@ async def cmd_debate(message: types.Message) -> None:
     theme_prompt = build_theme_prompt(theme)
 
     # Run debate
-    code, scores = await debate_generate(prompt, theme_prompt)
+    try:
+        code, scores = await debate_generate(prompt, theme_prompt)
+    except Exception as e:
+        logger.error(f"Debate generation failed: {e}")
+        await _safe_reply(message, f"⚠️ Debate failed: {e}")
+        return
     if not code:
         await _safe_reply(message, "⚠️ Both debate agents failed. Try a simpler prompt.")
         return
@@ -2003,9 +2190,9 @@ async def cmd_debate(message: types.Message) -> None:
     score_text = "⚔️ **Debate Results:**\n"
     if "winner" in scores:
         score_text += f"🏆 Agent {scores['winner']} won\n"
-    if "agent_a" in scores and isinstance(scores["agent_a"], float):
+    if isinstance(scores.get("agent_a"), (int, float)) and isinstance(scores.get("agent_b"), (int, float)):
         score_text += f"Agent A: {scores['agent_a']:.1f}/10 | Agent B: {scores['agent_b']:.1f}/10\n"
-    score_text += "\n🎬 Rendering winner's code..."
+    score_text += "\n🎬 Rendering winner's code…"
     await _safe_reply(message, score_text)
 
     is_3d = any(w in prompt.lower() for w in ("3d", "three-dimensional"))
@@ -2102,7 +2289,7 @@ async def cmd_class(message: types.Message) -> None:
             "📊 **Class Engagement**\n\n"
             f"**Students:** {eng['students']}\n"
             f"**Total views:** {eng['total_views']}\n"
-            f"**Avg views/student:** {eng['avg_views_per_student']}\n"
+            f"**Avg views/student:** {eng['avg_views_per_student']:.1f}\n"
             f"**Engagement rate:** {eng['engagement_rate']:.0f}%"
         ))
     else:
@@ -2219,16 +2406,22 @@ async def handle_photo(message: types.Message) -> None:
             )
         response = await chat_with_image(image_data, analysis_prompt, provider=user_provider)
 
-        # Step 2: Check if it's formula content
-        if response.startswith("FORMULA:") or "FORMULA:" in response:
+        # Step 2: Check if it's formula content. Match a LEADING FORMULA: tag only
+        # (tolerating whitespace/case) — a bare substring test misfired on replies
+        # like "This is NOT a FORMULA: …", routing non-math images into animation.
+        stripped = response.lstrip()
+        if stripped[:8].upper() == "FORMULA:":
             # Extract the animation suggestion
-            formula_desc = response.replace("FORMULA:", "").strip()
+            formula_desc = stripped[8:].strip()
             await _safe_reply(message, f"📐 Math detected!\n\n{formula_desc}\n\n🎬 Generating animation...")
             is_3d = any(w in formula_desc.lower() for w in ("3d", "three-dimensional"))
             await _send_animation(message, f"Animate: {formula_desc}", is_3d=is_3d)
         else:
-            # Regular image description
-            await _safe_reply(message, response)
+            # Regular image description — strip the leading CHAT: control tag the
+            # model was asked to emit so the user never sees the routing marker.
+            if stripped[:5].upper() == "CHAT:":
+                stripped = stripped[5:].strip()
+            await _safe_reply(message, stripped or response)
     except TelegramBadRequest as e:
         logger.error(f"Photo handler Telegram error: {e}")
         await _safe_reply(message, f"⚠️ Couldn't process image: {e}")
@@ -2374,7 +2567,7 @@ async def handle_text(message: types.Message) -> None:
         if target and target.get("code"):
             original_prompt = target.get("prompt", "")
             last_code = target.get("code", "")
-            await _safe_reply(message, f"✏️ Editing animation: _\"{original_prompt[:60]}...\"_\n\nApplying: _\"{text[:80]}\"_")
+            await _safe_reply(message, f"✏️ Editing animation: _\"{_ellipsize(original_prompt, 60)}\"_\n\nApplying: _\"{_ellipsize(text, 80)}\"_")
             # Edit-by-diff: start from the prior code and apply only the change,
             # preserving the animation the user already liked.
             is_3d = any(w in (original_prompt + " " + text).lower() for w in ("3d", "three-dimensional"))
@@ -2385,6 +2578,19 @@ async def handle_text(message: types.Message) -> None:
             return
         # No code available, treat as normal message
         logger.warning("Reply to video but no code in DB — treating as normal chat")
+
+    # Course lesson selection: after /course we invite "reply with a lesson
+    # number". A bare in-range number renders that lesson's animation; anything
+    # else (or out-of-range) falls through to normal intent routing.
+    lessons = _last_course.get(chat_id)
+    if lessons and text.isdigit():
+        idx = int(text)
+        if 1 <= idx <= len(lessons):
+            lesson = lessons[idx - 1]
+            await _safe_reply(message, f"📚 Rendering lesson {idx}: **{lesson.title}**…")
+            is_3d = any(w in lesson.prompt.lower() for w in ("3d", "three-dimensional"))
+            await _send_animation(message, lesson.prompt, is_3d=is_3d)
+            return
 
     intent = await _classify_intent(text, chat_id)
 

@@ -5,8 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from prompt_builder import _assess_complexity, build_complexity_modifier
-from render_tier import CONSTRAINED, CINEMATIC
+from prompt_builder import _assess_complexity, build_complexity_modifier, recommend_depth
+from render_tier import CONSTRAINED, CINEMATIC, CLOUD_CINEMATIC
 
 
 # ── SIMPLE prompts ───────────────────────────────────────────────────────────
@@ -89,6 +89,51 @@ def test_modifier_complex_cinematic_is_ambitious():
 def test_modifier_medium_empty():
     result = build_complexity_modifier("probability of coin flip animation", CONSTRAINED)
     assert result == ""
+
+
+# ── recommend_depth (length/coverage policy) ─────────────────────────────────
+
+def test_depth_constrained_always_compact():
+    # The 8 GB laptop tier must stay short/safe regardless of complexity.
+    assert recommend_depth("draw a circle", CONSTRAINED) == "compact"
+    assert recommend_depth(
+        "derive and prove the fourier series with a full worked example", CONSTRAINED
+    ) == "compact"
+
+
+def test_depth_capable_simple_is_standard():
+    assert recommend_depth("animate a sine wave", CLOUD_CINEMATIC) == "standard"
+    assert recommend_depth("show me a graph", CINEMATIC) == "standard"
+
+
+def test_depth_capable_complex_is_deep():
+    assert recommend_depth(
+        "derive and prove the Fourier series with a worked example and geometric intuition",
+        CLOUD_CINEMATIC,
+    ) == "deep"
+
+
+def test_capable_complexity_modifier_scales_length():
+    # Capable-tier length policy has TWO buckets (see recommend_depth): SIMPLE and
+    # MEDIUM share the "standard" band (~40-60s, 6-9 beats), COMPLEX is "deep"
+    # (~60-90s). SIMPLE must NOT advertise a shorter band than the storyboard it
+    # accompanies, or the two directives contradict inside one code-gen prompt.
+    assert "40-60" in build_complexity_modifier("draw a circle", CLOUD_CINEMATIC)
+    assert "45-60" in build_complexity_modifier(
+        "animate the probability distribution of a coin flip", CLOUD_CINEMATIC
+    )
+    assert "60-90" in build_complexity_modifier(
+        "derive and prove the fourier series step by step with a worked example", CLOUD_CINEMATIC
+    )
+
+
+def test_simple_band_does_not_undercut_standard_depth():
+    # Regression: capable SIMPLE → recommend_depth "standard" (6-9 beats), so the
+    # code-gen footer must not ask for fewer beats than the storyboard plans.
+    assert recommend_depth("draw a circle", CLOUD_CINEMATIC) == "standard"
+    modifier = build_complexity_modifier("draw a circle", CLOUD_CINEMATIC)
+    assert "6-9 beats" in modifier
+    assert "~5 beats" not in modifier
 
 
 if __name__ == "__main__":

@@ -122,7 +122,7 @@ MANIM_FPS = _getint("MANIM_FPS", 0)  # 0 = use the tier's fps; >0 forces a value
 # to 24576: storyboard-driven generation (multiple beats) plus reasoning tokens
 # were exceeding 16384 and getting cut off — truncation was the single largest
 # cause of Judge rejections.
-MANIM_MAX_OUTPUT_TOKENS = _getint("MANIM_MAX_OUTPUT_TOKENS", 24576)
+MANIM_MAX_OUTPUT_TOKENS = _getint("MANIM_MAX_OUTPUT_TOKENS", 32768)
 # Enable Qwen "thinking" for the creative code-gen task. Safeguarded in llm.py:
 # if a thinking response returns no content, it retries with thinking disabled.
 MANIM_ENABLE_THINKING = _getbool("MANIM_ENABLE_THINKING", True)
@@ -134,6 +134,44 @@ CRITIC_REPAIR_THRESHOLD = _getfloat("CRITIC_REPAIR_THRESHOLD", 6.0)
 # narration plan BEFORE code, then implement it beat-by-beat. Graceful — failure
 # falls back to the lighter scene-layout plan and today's behavior.
 STORYBOARD_ENABLED = _getbool("STORYBOARD_ENABLED", True)
+
+# Visual Metaphor Library: a curated registry of teaching metaphors (function as a
+# machine, derivative as a sliding tangent, matrix as a warping grid…). When a
+# prompt matches, the director gets a menu to choose a spine metaphor and the code
+# generator gets a concrete, implementable Manim recipe for it. Graceful — no match
+# (or disabled) simply adds nothing and the pipeline behaves as before.
+VISUAL_METAPHORS_ENABLED = _getbool("VISUAL_METAPHORS_ENABLED", True)
+
+# Character narrator (experimental, opt-in): a minimal Pi-creature-style guide built
+# from Manim CE primitives and injected into the code-gen prompt as a verbatim helper
+# class (so the cloud worker needs no extra dependency). OFF by default — a hand-built
+# character can read as rough, so it only activates when BOTH this flag is set AND the
+# prompt explicitly asks for a guide/teacher/character (see pi_creature.wants_character).
+CHARACTER_NARRATOR_ENABLED = _getbool("CHARACTER_NARRATOR_ENABLED", False)
+
+# Plan→compiler fast path (experimental, opt-in): the LLM emits a STRICT JSON plan
+# (plan_schema) which a deterministic, non-LLM compiler (plan_compiler) turns into
+# guaranteed-safe Manim code for common layouts. OFF by default — it trades visual
+# ambition for reproducibility/safety, and falls back to normal LLM code-gen whenever
+# the plan doesn't fully validate. Highest-reliability path when enabled.
+PLAN_COMPILER_ENABLED = _getbool("PLAN_COMPILER_ENABLED", False)
+
+
+def _get_id_set(*keys: str) -> frozenset[int]:
+    """Parse comma/semicolon-separated Telegram ids from one or more env keys."""
+    ids: set[int] = set()
+    for key in keys:
+        for part in _get(key).replace(";", ",").split(","):
+            part = part.strip()
+            if part.lstrip("-").isdigit():
+                ids.add(int(part))
+    return frozenset(ids)
+
+
+# Owner/admin chat ids allowed to use privileged commands (e.g. /restart). Accepts
+# a comma-separated ADMIN_CHAT_IDS and also reuses WATCHDOG_NOTIFY_CHAT (already the
+# owner's chat for restart notifications). Empty → privileged commands are disabled.
+ADMIN_CHAT_IDS = _get_id_set("ADMIN_CHAT_IDS", "WATCHDOG_NOTIFY_CHAT")
 
 # Best-of-N tournament: generate N candidates, render drafts in parallel on the
 # cloud farm, vision-rank the ACTUAL frames, and keep the best. 1 = disabled
@@ -158,7 +196,7 @@ CLOUD_RENDER_ENABLED = _getbool("CLOUD_RENDER_ENABLED", False)
 CLOUD_RENDER_REPO = _get("CLOUD_RENDER_REPO", "")          # e.g. "gopheriv/manim-render-worker"
 CLOUD_RENDER_WORKFLOW = _get("CLOUD_RENDER_WORKFLOW", "render.yml")
 CLOUD_RENDER_BRANCH = _get("CLOUD_RENDER_BRANCH", "main")
-CLOUD_RENDER_TIMEOUT = _getint("CLOUD_RENDER_TIMEOUT", 1200)  # seconds to await a cloud job
+CLOUD_RENDER_TIMEOUT = _getint("CLOUD_RENDER_TIMEOUT", 3600)  # seconds to await a cloud job (60 min — long/deep renders)
 CLOUD_RENDER_POLL = _getint("CLOUD_RENDER_POLL", 10)         # seconds between status polls
 
 # ── Queue / Concurrency ─────────────────────────────────────────────────────

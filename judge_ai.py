@@ -277,7 +277,7 @@ async def judge_code(
 
     system_prompt = _build_system_prompt(tier_name, allow_heavy)
 
-    code_snippet = manim_code[:6000]
+    code_snippet = manim_code[:16000]  # review the whole long scene, not just the head
     context_parts = [f"Review this Manim code for correctness. Animation request: {original_prompt}"]
     # Only forward correctness-relevant signals (educational issues); drop the
     # layout/performance static noise the Judge must ignore by design.

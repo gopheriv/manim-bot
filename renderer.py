@@ -16,6 +16,7 @@ from typing import Callable
 import psutil
 
 from common import CREATE_NO_WINDOW
+from code_safety import validate_code_safety
 from render_tier import Tier, get_tier
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,15 @@ async def render(
         progress_cb: Called with (pct, animation_name) as Manim renders.
         tier: Active render tier (defaults to the auto-detected tier).
     """
+    # Safety gate (fail-closed): never execute LLM code that imports os/subprocess,
+    # calls exec/eval, or reaches for sandbox-escape dunders. This runs the module,
+    # so an injected payload would otherwise execute here.
+    safe, safety_issues = validate_code_safety(code)
+    if not safe:
+        render._last_error = "Render blocked — unsafe code: " + "; ".join(safety_issues)
+        logger.error(render._last_error)
+        return None
+
     tier = tier or get_tier()
     mem = psutil.virtual_memory()
     if mem.percent > RAM_PRECHECK_PCT:

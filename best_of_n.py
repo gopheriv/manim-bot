@@ -37,16 +37,30 @@ from visual_critic import critique_render
 logger = logging.getLogger("best_of_n")
 
 
-async def _gen_candidate(prompt: str, theme_prompt: str) -> str:
-    """Generate ONE candidate: its own storyboard IR, then code (sampling = diversity)."""
+async def _gen_candidate(
+    prompt: str,
+    theme_prompt: str,
+    metaphor_menu: str = "",
+    metaphor_recipes: str = "",
+) -> str:
+    """Generate ONE candidate: its own storyboard IR, then code (sampling = diversity).
+
+    The metaphor menu/recipes (computed once per request) are shared by every
+    candidate — diversity comes from sampling, not from different metaphors — so
+    the director picks a spine from the same menu and the generator gets the same
+    concrete recipes the single-candidate path would.
+    """
     storyboard_text = ""
     try:
-        sb = parse_storyboard(await generate_storyboard(prompt))
+        sb = parse_storyboard(await generate_storyboard(prompt, metaphor_menu=metaphor_menu))
         if sb:
             storyboard_text = format_storyboard_for_codegen(sb)
     except Exception as e:  # noqa: BLE001 — storyboard is best-effort
         logger.debug("Best-of-N candidate storyboard failed (non-fatal): %s", e)
-    code = await generate_manim_code(prompt, theme_instructions=theme_prompt, storyboard=storyboard_text)
+    code = await generate_manim_code(
+        prompt, theme_instructions=theme_prompt,
+        storyboard=storyboard_text, metaphor_recipes=metaphor_recipes,
+    )
     return strip_code_fences(code)
 
 
@@ -73,15 +87,23 @@ async def select_best_code(
     chat_id: int,
     draft_quality: str = "-ql",
     draft_fps: int = 15,
+    metaphor_menu: str = "",
+    metaphor_recipes: str = "",
 ) -> str | None:
-    """Run the tournament and return the winning candidate's code (or None)."""
+    """Run the tournament and return the winning candidate's code (or None).
+
+    ``metaphor_menu`` / ``metaphor_recipes`` (from the Visual Metaphor Library)
+    are shared by every candidate so the tournament is metaphor-guided the same
+    way the single-candidate path is.
+    """
     n = max(2, int(n))
 
     # 1) Generate N candidates concurrently. Keep each candidate's ORIGINAL index
     # so draft dirs and logs stay aligned with the candidate that produced them
     # (filtering out invalid ones must not renumber the survivors).
     gen = await asyncio.gather(
-        *[_gen_candidate(prompt, theme_prompt) for _ in range(n)],
+        *[_gen_candidate(prompt, theme_prompt, metaphor_menu=metaphor_menu, metaphor_recipes=metaphor_recipes)
+          for _ in range(n)],
         return_exceptions=True,
     )
     codes = [(i, c) for i, c in enumerate(gen) if _is_valid_code(c)]
