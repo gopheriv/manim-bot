@@ -72,12 +72,12 @@ CHAT_MODEL = _get("CHAT_MODEL", "qwen3.6-plus")
 # (JUDGE_BASE_URL below intentionally points at the same endpoint).
 LLM_BASE_URL = _get("LLM_BASE_URL", "")
 
-# ── LLM: Qwen 3.7 Max (for Manim code generation) ─────────────────────
+# ── LLM: Claude Opus 4.8 via cc-vibe (for Manim code generation) ─────────────────────
 GPT_BASE_URL = _get("GPT_BASE_URL", "")
 GPT_API_KEY = _get("GPT_API_KEY", "")
 # Env key is MANIM_MODEL (the model used for Manim code-gen); the variable keeps
 # the historical GPT_MODEL name. Accept GPT_MODEL too for forward consistency.
-GPT_MODEL = _get("MANIM_MODEL") or _get("GPT_MODEL", "qwen3.7-max")
+GPT_MODEL = _get("MANIM_MODEL") or _get("GPT_MODEL", "claude-opus-4-8")
 IMAGE_MODEL = _get("IMAGE_MODEL", "")
 GPT_REASONING_EFFORT = _get("GPT_REASONING_EFFORT", "")
 GPT_MAX_RETRIES = _getint("GPT_MAX_RETRIES", 2)

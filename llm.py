@@ -1,4 +1,4 @@
-"""LLM integration: GPT-5.5 for Manim code generation,
+"""LLM integration: Claude Opus 4.8 (cc-vibe) for Manim code generation,
 Qwen 3.6 Plus or Claude Opus 4.8 for chat, vision, and self-healing."""
 
 import base64
@@ -41,11 +41,11 @@ logger = logging.getLogger(__name__)
 # Runtime-overridable provider (default from .env)
 _active_provider = LLM_PROVIDER
 
-# Qwen 3.7 Max client for Manim code generation (DashScope)
+# Claude Opus 4.8 client for Manim code generation (cc-vibe, OpenAI-compatible)
 gpt_coding_client = AsyncOpenAI(
     api_key=GPT_API_KEY,
     base_url=GPT_BASE_URL,
-    timeout=300,  # 5 min — Qwen 3.7 Max can be slow
+    timeout=300,  # 5 min — Claude Opus 4.8 can be slow on large prompts
     max_retries=0,
 )
 
@@ -190,10 +190,10 @@ async def _codegen_complete(messages: list[dict], max_tokens: int | None = None,
     return response.choices[0].message.content or ""
 
 
-# ── Manim code generation (GPT-5.5) ─────────────────────────────────────────
+# ── Manim code generation (Claude Opus 4.8 via cc-vibe) ────────────────────
 
 async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "", storyboard: str = "", metaphor_recipes: str = "", character_helper: str = "", domain_guidance: str = "") -> str:
-    """Generate Manim animation code (Qwen 3.7 Max, reasoning ON, large output)."""
+    """Generate Manim animation code (Claude Opus 4.8, large output)."""
     try:
         messages = [
             {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan, storyboard=storyboard, metaphor_recipes=metaphor_recipes, character_helper=character_helper, domain_guidance=domain_guidance)},
@@ -207,7 +207,7 @@ async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_p
 
 
 async def fix_manim_code(original_prompt: str, error: str, theme_instructions: str = "", original_code: str = "") -> str:
-    """Fix broken Manim code (Qwen 3.7 Max, reasoning ON, large output)."""
+    """Fix broken Manim code (Claude Opus 4.8, large output)."""
     try:
         # Send the full failing code (generous guard) — truncating to 4000 chars
         # hid the actual broken line for any non-trivial scene, so the fix model
@@ -346,7 +346,7 @@ async def repair_targeted(
 # ── Scene planning & layout repair ───────────────────────────────────────────
 
 async def generate_scene_plan(prompt: str) -> str:
-    """Generate a JSON scene composition plan with GPT-5.5 (fast, low tokens)."""
+    """Generate a JSON scene composition plan with the coding model (fast, low tokens)."""
     try:
         kwargs: dict[str, Any] = {
             "model": GPT_MODEL,

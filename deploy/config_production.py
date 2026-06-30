@@ -44,11 +44,11 @@ DASHSCOPE_API_KEY = _get("OPENAI_API_KEY")
 CHAT_MODEL = _get("CHAT_MODEL", "qwen3.6-plus")
 LLM_BASE_URL = _get("LLM_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
 
-# ── LLM: GPT-5.5 (self-hosted proxy for Manim code generation) ─────────────
-GPT_BASE_URL = _get("GPT_PROXY_BASE_URL", "http://64.118.150.213:8080/v1")
-GPT_API_KEY = _get("GPT_PROXY_API_KEY", DASHSCOPE_API_KEY)
-GPT_MODEL = _get("MANIM_MODEL", "gpt-5.5")
-GPT_REASONING_EFFORT = _get("GPT_REASONING_EFFORT", "xhigh")
+# ── LLM: Claude Opus 4.8 via cc-vibe (Manim code generation) ───────────────
+GPT_BASE_URL = _get("GPT_BASE_URL", "https://cc-vibe.com/v1")
+GPT_API_KEY = _get("GPT_API_KEY", "")
+GPT_MODEL = _get("MANIM_MODEL", "claude-opus-4-8")
+GPT_REASONING_EFFORT = _get("GPT_REASONING_EFFORT", "")
 GPT_MAX_RETRIES = _getint("GPT_MAX_RETRIES", 3)
 
 # ── Manim rendering (server-optimized) ─────────────────────────────────────

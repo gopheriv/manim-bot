@@ -1,4 +1,4 @@
-"""Manim Animation Bot — Telegram bot with GPT-5.5 code gen, Qwen 3.6 chat,
+"""Manim Animation Bot — Telegram bot with Claude Opus 4.8 code gen, Qwen 3.6 chat,
 edge-tts voiceover, themes, queue management, rate limiting, and D1 caching."""
 
 import asyncio
