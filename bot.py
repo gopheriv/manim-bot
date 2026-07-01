@@ -1,4 +1,4 @@
-"""Manim Animation Bot — Telegram bot with GPT-5.5 code gen, Qwen 3.6 chat,
+"""Manim Animation Bot — Telegram bot with Claude Opus 4.8 code gen, Qwen 3.6 chat,
 edge-tts voiceover, themes, queue management, rate limiting, and D1 caching."""
 
 import asyncio
@@ -36,6 +36,7 @@ from config import (
     CRITIC_REPAIR_THRESHOLD,
     VISUAL_CRITIC_ENABLED,
     VISUAL_CRITIC_MAX_PASSES,
+    AESTHETIC_DIRECTOR_ENABLED,
     STORYBOARD_ENABLED,
     VISUAL_METAPHORS_ENABLED,
     CHARACTER_NARRATOR_ENABLED,
@@ -93,6 +94,7 @@ from exam_prep import get_random_question, generate_animation_for_question
 from gallery import get_featured, get_by_category, get_by_id, search as gallery_search, increment_view
 from multi_agent_debate import debate_generate
 from visual_critic import critique_render
+from aesthetic_director import critique_render_panel
 from referral import register_user, get_user_referral_info
 # teacher_dashboard is an OPTIONAL feature — a broken import here must not take
 # down the whole bot. Fall back to stubs that report the feature is unavailable.
@@ -127,6 +129,28 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("bot")
+
+# Infrastructure error patterns — GitHub Actions, network, workflow issues that
+# self-heal cannot fix (no amount of code fixing helps when the runner is broken).
+_INFRA_ERROR_PATTERNS = re.compile(
+    r"node\.js\s*(20|24)|"
+    r"actions/(checkout|setup-python|upload-artifact|download-artifact)|"
+    r"workflow_dispatch|"
+    r"gh (timed out|command not found|auth)|"
+    r"no runner|runner not found|"
+    r"artifact.*(not found|download|upload)|"
+    r"rate.?limit|api rate|"
+    r"connection (refused|reset|timed out)|"
+    r"http\s*(502|503|504)|"
+    r"process completed with exit code 1.*node\.js",
+    re.IGNORECASE,
+)
+
+
+def _is_infra_error(error_msg: str) -> bool:
+    """True if the error is infrastructure (GitHub Actions, network) — not a code bug."""
+    return bool(_INFRA_ERROR_PATTERNS.search(error_msg))
+
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -554,7 +578,12 @@ async def _send_animation(
                 # Depth profile (length + coverage) — scales with tier + prompt
                 # complexity; constrained tier stays 'compact' to keep local safe.
                 depth = recommend_depth(prompt, tier)
-                logger.info("Depth profile: %s (tier=%s)", depth, tier.name)
+                # Pedagogical mode: complex topics (depth="deep") get the
+                # 5-stage arc, misconception defusing, and spine metaphor.
+                # Simple/medium topics on capable tiers and ALL constrained-tier
+                # topics get the standard storyboard (no extra cost).
+                pedagogical = (depth == "deep")
+                logger.info("Depth profile: %s (tier=%s, pedagogical=%s)", depth, tier.name, pedagogical)
 
                 # Visual metaphor library — pick the teaching metaphor(s) this prompt
                 # invites: a menu for the director (spine) + concrete Manim recipes for
@@ -595,12 +624,49 @@ async def _send_animation(
                         raw_sb = await generate_storyboard(
                             prompt, lessons=top_lessons, hard_constraints=hard_constraints,
                             depth=depth, metaphor_menu=metaphor_menu,
+                            pedagogical=pedagogical,
                         )
                         sb = parse_storyboard(raw_sb)
                         if sb:
                             issues = validate_storyboard(sb)
                             if issues:
                                 logger.info("Storyboard composition notes: %s", "; ".join(issues[:4]))
+
+                            # Pedagogical quality gate: for complex topics, verify the
+                            # storyboard carries the structural hallmarks of a well-taught
+                            # explainer. If not, regenerate ONCE with feedback.
+                            if pedagogical:
+                                from pedagogy import validate_pedagogical_storyboard
+                                ped_issues = validate_pedagogical_storyboard(sb)
+                                if ped_issues:
+                                    logger.info("Pedagogical storyboard missing: %s", "; ".join(ped_issues[:3]))
+                                    try:
+                                        note = (
+                                            "Your previous storyboard was missing key pedagogical elements: "
+                                            + "; ".join(ped_issues)
+                                            + ". Please include ALL of them in this attempt."
+                                        )
+                                        retry_constraints = (hard_constraints or []) + [note]
+                                        raw_sb2 = await generate_storyboard(
+                                            prompt, lessons=top_lessons,
+                                            hard_constraints=retry_constraints,
+                                            depth=depth, metaphor_menu=metaphor_menu,
+                                            pedagogical=True,
+                                        )
+                                        sb2 = parse_storyboard(raw_sb2)
+                                        if sb2:
+                                            ped_issues2 = validate_pedagogical_storyboard(sb2)
+                                            if len(ped_issues2) < len(ped_issues):
+                                                sb = sb2  # retry was better
+                                                logger.info("Pedagogical retry improved: %d → %d issues",
+                                                             len(ped_issues), len(ped_issues2))
+                                            else:
+                                                logger.info("Pedagogical retry did not improve — keeping first")
+                                        else:
+                                            logger.info("Pedagogical retry parse failed — keeping first")
+                                    except Exception as e:
+                                        logger.warning("Pedagogical retry failed (non-fatal): %s", e)
+
                             storyboard_text = format_storyboard_for_codegen(sb)
                             storyboard_obj = sb
                             logger.info(
@@ -650,6 +716,7 @@ async def _send_animation(
                             draft_quality=BEST_OF_N_DRAFT_QUALITY,
                             metaphor_menu=metaphor_menu,
                             metaphor_recipes=metaphor_recipes,
+                            storyboard_text=storyboard_text,
                         )
                         if winner:
                             code = winner
@@ -919,6 +986,7 @@ async def _send_animation(
                             sb = parse_storyboard(await generate_storyboard(
                                 prompt, lessons=top_lessons, hard_constraints=regen_constraints,
                                 depth=depth, metaphor_menu=metaphor_menu,
+                                pedagogical=pedagogical,
                             ))
                             if sb:
                                 storyboard_text = format_storyboard_for_codegen(sb)
@@ -944,6 +1012,7 @@ async def _send_animation(
                             storyboard=storyboard_text,  # keep the director's plan on regen
                             metaphor_recipes=metaphor_recipes,
                             domain_guidance=domain_guidance,
+                            character_helper=character_helper,  # keep the narrator on regen too
                         )
                         if "class GenScene" not in code or "def construct" not in code:
                             logger.warning("Regenerated code missing structure, trying layout repair")
@@ -1081,11 +1150,12 @@ async def _send_animation(
                 else:
                     last_render_error = get_last_error() or "Local render failed"
 
-            # Cloud render code errors → self-heal (same as local code errors)
+            # Cloud render code errors → self-heal (skip infrastructure errors)
             if (video_path is None and last_render_error
                     and cloud_available()
                     and MANIM_MAX_RETRIES > 0
-                    and "cancelled" not in last_render_error.lower()):
+                    and "cancelled" not in last_render_error.lower()
+                    and not _is_infra_error(last_render_error)):
                 error_msg = last_render_error
                 for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
                     logger.info("Cloud render failed — self-healing attempt %d/%d", heal_attempt, MANIM_MAX_RETRIES)
@@ -1129,6 +1199,21 @@ async def _send_animation(
                     # on prompt_snippet, and the enhanced text is unstable/unseen.
                     log_error(original_prompt, last_render_error, code)
 
+            # Infrastructure failures — skip self-heal, tell user it's not their fault:
+            if video_path is None and last_render_error and _is_infra_error(last_render_error):
+                logger.warning("Infrastructure error detected — skipping self-heal: %s", last_render_error[:200])
+                task.status = TaskStatus.FAILED
+                task.error_message = last_render_error[:500]
+                task.completed_at = datetime.now()
+                analytics.log_render_failure(chat_id, "infra_error")
+                await _safe_edit(
+                    status_msg,
+                    "⚠️ Cloud render infrastructure is temporarily down (GitHub Actions issue). "
+                    "This is NOT a code problem — no fix will help until the runner recovers. "
+                    "Try again later or switch to local rendering.",
+                )
+                return
+
             # Resource failures on LOCAL render (only when cloud is NOT available):
             if (video_path is None and not cloud_available()
                     and get_last_error()
@@ -1158,7 +1243,8 @@ async def _send_animation(
 
             # Self-healing for LOCAL render CODE errors (only when cloud is NOT available):
             if (video_path is None and not cloud_available()
-                    and get_last_error() and MANIM_MAX_RETRIES > 0):
+                    and get_last_error() and MANIM_MAX_RETRIES > 0
+                    and not _is_infra_error(get_last_error())):
                 error_msg = get_last_error()
                 if "cancelled" not in error_msg.lower():
                     for heal_attempt in range(1, MANIM_MAX_RETRIES + 1):
@@ -1270,7 +1356,13 @@ async def _send_animation(
             if VISUAL_CRITIC_ENABLED and video_path and not task.is_cancelled():
                 for vpass in range(VISUAL_CRITIC_MAX_PASSES):
                     try:
-                        verdict = await critique_render(video_path, prompt, code)
+                        # Opt-in: the calibrated Aesthetic Director panel (far higher
+                        # precision) judges the frames inside this same loop; default
+                        # off → legacy single critic, unchanged behavior.
+                        if AESTHETIC_DIRECTOR_ENABLED:
+                            verdict = await critique_render_panel(video_path, prompt, code)
+                        else:
+                            verdict = await critique_render(video_path, prompt, code)
                     except Exception as e:
                         logger.warning(f"Visual critic error (non-fatal): {e}")
                         break

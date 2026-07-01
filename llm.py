@@ -1,5 +1,5 @@
-"""LLM integration: GPT-5.5 for Manim code generation,
-Qwen 3.6 Plus or Claude Opus 4.8 for chat, vision, and self-healing."""
+"""LLM integration: Qwen 3.7 Max (DashScope) for Manim code generation,
+Qwen 3.6 Plus for chat/vision, GLM-5.2 (EdgeFN) for chat, and Claude Opus 4.8 (zjapi) as backup."""
 
 import base64
 import logging
@@ -9,7 +9,7 @@ from typing import Any
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 
-from common import parse_llm_json
+from common import parse_llm_json, extract_python_code
 from config import (
     DASHSCOPE_API_KEY,
     CHAT_MODEL,
@@ -41,11 +41,11 @@ logger = logging.getLogger(__name__)
 # Runtime-overridable provider (default from .env)
 _active_provider = LLM_PROVIDER
 
-# Qwen 3.7 Max client for Manim code generation (DashScope)
+# Claude Opus 4.8 client for Manim code generation (cc-vibe, OpenAI-compatible)
 gpt_coding_client = AsyncOpenAI(
     api_key=GPT_API_KEY,
     base_url=GPT_BASE_URL,
-    timeout=300,  # 5 min — Qwen 3.7 Max can be slow
+    timeout=300,  # 5 min — Claude Opus 4.8 can be slow on large prompts
     max_retries=0,
 )
 
@@ -190,24 +190,24 @@ async def _codegen_complete(messages: list[dict], max_tokens: int | None = None,
     return response.choices[0].message.content or ""
 
 
-# ── Manim code generation (GPT-5.5) ─────────────────────────────────────────
+# ── Manim code generation (Claude Opus 4.8 via cc-vibe) ────────────────────
 
 async def generate_manim_code(prompt: str, theme_instructions: str = "", scene_plan: str = "", storyboard: str = "", metaphor_recipes: str = "", character_helper: str = "", domain_guidance: str = "") -> str:
-    """Generate Manim animation code (Qwen 3.7 Max, reasoning ON, large output)."""
+    """Generate Manim animation code (Claude Opus 4.8, large output)."""
     try:
         messages = [
             {"role": "system", "content": build_manim_system_prompt(theme_instructions, prompt, scene_plan=scene_plan, storyboard=storyboard, metaphor_recipes=metaphor_recipes, character_helper=character_helper, domain_guidance=domain_guidance)},
             {"role": "user", "content": prompt},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
-        return strip_code_fences(content)
+        return extract_python_code(content)
     except Exception as e:
         logger.error(f"GPT code generation error: {e}")
         raise
 
 
 async def fix_manim_code(original_prompt: str, error: str, theme_instructions: str = "", original_code: str = "") -> str:
-    """Fix broken Manim code (Qwen 3.7 Max, reasoning ON, large output)."""
+    """Fix broken Manim code (Claude Opus 4.8, large output)."""
     try:
         # Send the full failing code (generous guard) — truncating to 4000 chars
         # hid the actual broken line for any non-trivial scene, so the fix model
@@ -218,7 +218,7 @@ async def fix_manim_code(original_prompt: str, error: str, theme_instructions: s
             {"role": "user", "content": f"Original request: {original_prompt}{code_context}\n\nFix the error: {error}"},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
-        return strip_code_fences(content)
+        return extract_python_code(content)
     except Exception as e:
         logger.error(f"GPT self-heal error: {e}")
         raise
@@ -260,7 +260,7 @@ async def complete_manim_code(
             )},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
-        return strip_code_fences(content)
+        return extract_python_code(content)
     except Exception as e:
         logger.error(f"GPT completion error: {e}")
         raise
@@ -303,7 +303,7 @@ async def edit_manim_code(
             },
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=240)
-        return strip_code_fences(content)
+        return extract_python_code(content)
     except Exception as e:
         logger.error(f"Edit-by-diff error: {e}")
         raise
@@ -337,7 +337,7 @@ async def repair_targeted(
             {"role": "user", "content": f"Original request: {original_prompt}\n\nCode to fix:\n```python\n{code}\n```"},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=180)
-        return strip_code_fences(content)
+        return extract_python_code(content)
     except Exception as e:
         logger.error(f"Targeted repair error: {e}")
         return code  # non-fatal: keep original on failure
@@ -346,7 +346,7 @@ async def repair_targeted(
 # ── Scene planning & layout repair ───────────────────────────────────────────
 
 async def generate_scene_plan(prompt: str) -> str:
-    """Generate a JSON scene composition plan with GPT-5.5 (fast, low tokens)."""
+    """Generate a JSON scene composition plan with the coding model (fast, low tokens)."""
     try:
         kwargs: dict[str, Any] = {
             "model": GPT_MODEL,
@@ -374,6 +374,7 @@ async def generate_storyboard(
     hard_constraints: list[str] | None = None,
     depth: str = "standard",
     metaphor_menu: str = "",
+    pedagogical: bool = False,
 ) -> str:
     """Generate a cinematography storyboard (JSON IR) for a request.
 
@@ -383,10 +384,16 @@ async def generate_storyboard(
     ``metaphor_menu`` offers curated teaching metaphors for the director to pick a
     spine from. Recurring Judge lessons (and hard constraints) are injected into
     the director system prompt so defects are designed out at the planning stage.
+    ``pedagogical``: when True, inject the PEDAGOGY_DIRECTIVE (5-stage arc,
+    misconception, spine metaphor, pacing rules) so complex topics are taught
+    with 3Blue1Brown clarity. Default False = unchanged behavior.
     """
     try:
         messages = [
-            {"role": "system", "content": build_storyboard_prompt(lessons, hard_constraints, depth=depth, metaphor_menu=metaphor_menu)},
+            {"role": "system", "content": build_storyboard_prompt(
+                lessons, hard_constraints, depth=depth,
+                metaphor_menu=metaphor_menu, pedagogical=pedagogical,
+            )},
             {"role": "user", "content": f"Storyboard this animation request: {prompt}"},
         ]
         # Reuse the thinking-on completion (with non-thinking fallback) — the
@@ -432,7 +439,7 @@ async def repair_layout(
             {"role": "user", "content": f"Fix the layout issues in this Manim code:\n\n{code}"},
         ]
         content = await _codegen_complete(messages, max_tokens=MANIM_MAX_OUTPUT_TOKENS, timeout=180)
-        return strip_code_fences(content)
+        return extract_python_code(content)
     except Exception as e:
         logger.error(f"Layout repair error: {e}")
         raise

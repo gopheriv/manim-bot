@@ -42,21 +42,32 @@ async def _gen_candidate(
     theme_prompt: str,
     metaphor_menu: str = "",
     metaphor_recipes: str = "",
+    storyboard_text: str = "",
 ) -> str:
-    """Generate ONE candidate: its own storyboard IR, then code (sampling = diversity).
+    """Generate ONE candidate: storyboard IR → code (sampling = diversity).
+
+    When ``storyboard_text`` is non-empty (e.g. a shared pedagogical storyboard
+    from the main pipeline), it is reused directly — skipping the per-candidate
+    ``generate_storyboard`` call entirely. Diversity across candidates then comes
+    from code-gen sampling, not from regenerating N storyboards. This is both
+    faster and ensures every candidate implements the same validated plan.
+
+    When ``storyboard_text`` is empty (default), each candidate generates its own
+    storyboard — preserving today's fallback behavior when no storyboard was built.
 
     The metaphor menu/recipes (computed once per request) are shared by every
     candidate — diversity comes from sampling, not from different metaphors — so
     the director picks a spine from the same menu and the generator gets the same
     concrete recipes the single-candidate path would.
     """
-    storyboard_text = ""
-    try:
-        sb = parse_storyboard(await generate_storyboard(prompt, metaphor_menu=metaphor_menu))
-        if sb:
-            storyboard_text = format_storyboard_for_codegen(sb)
-    except Exception as e:  # noqa: BLE001 — storyboard is best-effort
-        logger.debug("Best-of-N candidate storyboard failed (non-fatal): %s", e)
+    if not storyboard_text:
+        # No shared storyboard — generate one per candidate (today's behavior).
+        try:
+            sb = parse_storyboard(await generate_storyboard(prompt, metaphor_menu=metaphor_menu))
+            if sb:
+                storyboard_text = format_storyboard_for_codegen(sb)
+        except Exception as e:  # noqa: BLE001 — storyboard is best-effort
+            logger.debug("Best-of-N candidate storyboard failed (non-fatal): %s", e)
     code = await generate_manim_code(
         prompt, theme_instructions=theme_prompt,
         storyboard=storyboard_text, metaphor_recipes=metaphor_recipes,
@@ -89,12 +100,18 @@ async def select_best_code(
     draft_fps: int = 15,
     metaphor_menu: str = "",
     metaphor_recipes: str = "",
+    storyboard_text: str = "",
 ) -> str | None:
     """Run the tournament and return the winning candidate's code (or None).
 
     ``metaphor_menu`` / ``metaphor_recipes`` (from the Visual Metaphor Library)
     are shared by every candidate so the tournament is metaphor-guided the same
     way the single-candidate path is.
+
+    ``storyboard_text`` (from the main pipeline's validated storyboard — e.g. a
+    pedagogical 5-stage arc for complex topics) is reused by every candidate
+    instead of regenerating N storyboards. When empty, each candidate generates
+    its own (today's fallback behavior).
     """
     n = max(2, int(n))
 
@@ -102,7 +119,9 @@ async def select_best_code(
     # so draft dirs and logs stay aligned with the candidate that produced them
     # (filtering out invalid ones must not renumber the survivors).
     gen = await asyncio.gather(
-        *[_gen_candidate(prompt, theme_prompt, metaphor_menu=metaphor_menu, metaphor_recipes=metaphor_recipes)
+        *[_gen_candidate(prompt, theme_prompt, metaphor_menu=metaphor_menu,
+                         metaphor_recipes=metaphor_recipes,
+                         storyboard_text=storyboard_text)
           for _ in range(n)],
         return_exceptions=True,
     )

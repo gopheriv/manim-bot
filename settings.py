@@ -170,6 +170,8 @@ AVAILABLE_THEMES = [
     ("nord", "🧊 Nord", "Deep slate, pastel blues, minimal"),
     ("cyberpunk", "💜 Cyberpunk", "Black, neon pink/cyan, glowing"),
     ("chalkboard", "📝 Chalkboard", "Dark green, chalk white, rough"),
+    ("blueprint", "📐 Blueprint", "Navy background, cyan line-art, technical"),
+    ("colorsafe", "♿ ColorSafe", "Color-blind-safe, Okabe-Ito palette"),
 ]
 
 AVAILABLE_QUALITIES = [

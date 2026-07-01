@@ -207,11 +207,41 @@ def _compact_manim_error(stdout: str, stderr: str) -> str:
     return combined[-2200:]
 
 
+# Inlined twin of common.extract_python_code — this deploy module is intentionally
+# dependency-free so it can ship on a minimal Linux worker. Keep in sync.
+_FENCED_BLOCK_RE = re.compile(r"```[^\S\r\n]*[A-Za-z0-9_+-]*[^\S\r\n]*\r?\n(.*?)```", re.DOTALL)
+_OPEN_FENCE_RE = re.compile(r"(?m)^[^\S\r\n]*```[^\S\r\n]*[A-Za-z0-9_+-]*[^\S\r\n]*\r?\n")
+_STRAY_FENCE_LINE_RE = re.compile(r"(?m)^[^\S\r\n]*```.*\r?\n?")
+_CODE_LINE_RE = re.compile(
+    r'^[^\S\r\n]*(?:from\s+[.\w]|import\s+\w|#|@\w|class\s+\w|(?:async\s+)?def\s+\w|"""|\'\'\')'
+)
+
+
+def _extract_python_code(text: str) -> str:
+    """Strip any LLM prose/markdown wrapping so only runnable Python is written."""
+    if not text:
+        return ""
+    s = text.strip()
+    blocks = _FENCED_BLOCK_RE.findall(s)
+    if blocks:
+        return max(blocks, key=lambda b: (any(k in b for k in ("import ", "class ", "def ")), len(b))).strip("\r\n")
+    open_fence = _OPEN_FENCE_RE.search(s)
+    if open_fence:
+        s = s[open_fence.end():]
+    else:
+        lines = s.splitlines()
+        for i, line in enumerate(lines):
+            if _CODE_LINE_RE.match(line):
+                s = "\n".join(lines[i:])
+                break
+    return _STRAY_FENCE_LINE_RE.sub("", s).strip("\r\n")
+
+
 def _write_scene(code: str, chat_id: int) -> Path:
     SCENE_DIR.mkdir(parents=True, exist_ok=True)
     (RENDER_DIR / "media").mkdir(parents=True, exist_ok=True)
     scene_file = SCENE_DIR / f"scene_{chat_id}.py"
-    scene_file.write_text(code, encoding="utf-8")
+    scene_file.write_text(_extract_python_code(code), encoding="utf-8")
     return scene_file
 
 

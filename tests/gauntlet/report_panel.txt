@@ -1,0 +1,20 @@
+=== panel critic vs labeled set ===
+scene                        truth    flagged   detail
+scene08_latex_heavy          defect   ERROR     TimeoutError: 
+broken01_offframe            defect   FLAG      high=2 top=A gold circular shape is visibly cut off by the 
+broken02_overlap             defect   FLAG      high=1 top=In the settled final frames (3-5), the equation 
+broken03_tinytext            defect   FLAG      high=1 top=The explanatory text 'The crucial explanation to
+broken04_samecolor           defect   FLAG      high=1 top=The text line 'the contrast of this line is far 
+broken05_origin_stack        defect   pass      high=0 top=clean
+scene01_function_plot        clean    FLAG      high=1 top=The plotted parabola curve extends beyond the to
+scene02_equation_morph       clean    pass      high=0 top=clean
+scene03_valuetracker_dot     clean    ERROR     TimeoutError: 
+scene04_camera_pushin        clean    pass      high=0 top=clean
+scene05_true_3d              clean    pass      high=0 top=clean
+scene06_riemann_area         clean    FLAG      high=1 top=The blue function curve extends off the top-righ
+scene07_grid_transform       clean    pass      high=0 top=clean
+scene09_staggered_reveal     clean    pass      high=0 top=clean
+scene10_vectors              clean    pass      high=0 top=clean
+TP=4 FP=2 TN=6 FN=1 errors=2 | precision=67% recall=80%
+MISSED DEFECTS (recall failures): broken05_origin_stack
+FALSE ALARMS (precision failures): scene01_function_plot, scene06_riemann_area

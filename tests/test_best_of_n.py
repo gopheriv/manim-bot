@@ -3,7 +3,6 @@
 import asyncio
 from pathlib import Path
 
-import pytest
 
 import best_of_n
 
@@ -44,7 +43,7 @@ def test_tournament_picks_highest_score(monkeypatch):
     codes = [_good_code(i) for i in range(3)]
     scores = [5.0, 8.5, 6.0]  # candidate 1 wins
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         return codes.pop(0) if codes else ""
 
     async def fake_render(code, chat_id, idx, quality, fps):
@@ -67,7 +66,7 @@ def test_tournament_picks_highest_score(monkeypatch):
 def test_tournament_returns_none_when_all_gen_fail(monkeypatch):
     """If every candidate fails to generate, returns None."""
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         raise RuntimeError("LLM down")
 
     monkeypatch.setattr(best_of_n, "_gen_candidate", fake_gen)
@@ -80,7 +79,7 @@ def test_tournament_returns_unranked_when_all_renders_fail(monkeypatch):
     """If all drafts fail to render, returns the first valid candidate unranked."""
     codes = [_good_code(0), _good_code(1)]
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         return codes.pop(0) if codes else ""
 
     async def fake_render(code, chat_id, idx, quality, fps):
@@ -98,7 +97,7 @@ def test_tournament_handles_partial_gen_failure(monkeypatch):
     """Some candidates fail to generate; remaining are still rendered and judged."""
     call_count = 0
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         nonlocal call_count
         call_count += 1
         if call_count == 2:
@@ -125,7 +124,7 @@ def test_tournament_handles_scoring_failure(monkeypatch):
     codes = [_good_code(0), _good_code(1)]
     scores = [8.0, None]  # second score raises
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         return codes.pop(0) if codes else ""
 
     async def fake_render(code, chat_id, idx, quality, fps):
@@ -151,7 +150,7 @@ def test_n_clamped_to_minimum_2(monkeypatch):
     """n=1 is clamped to 2 (a tournament needs at least 2 candidates)."""
     gen_calls = 0
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         nonlocal gen_calls
         gen_calls += 1
         return _good_code(gen_calls)
@@ -199,7 +198,7 @@ def test_select_best_code_forwards_metaphors_to_every_candidate(monkeypatch):
     """The tournament shares one menu/recipe set across all N candidates."""
     seen = []
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         seen.append((metaphor_menu, metaphor_recipes))
         return _good_code(len(seen))
 
@@ -222,7 +221,7 @@ def test_invalid_code_filtered_from_candidates(monkeypatch):
     """Candidates that don't have GenScene/construct are filtered out before rendering."""
     responses = [_good_code(0), "print('hello')", _good_code(2)]
 
-    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes=""):
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
         return responses.pop(0) if responses else ""
 
     render_calls = []
@@ -243,3 +242,84 @@ def test_invalid_code_filtered_from_candidates(monkeypatch):
     # The invalid candidate should NOT have been rendered
     assert len(render_calls) == 2
     assert all("GenScene" in c for c in render_calls)
+
+
+# ── Phase 2: storyboard_text threading ──────────────────────────────────────
+
+def test_gen_candidate_reuses_shared_storyboard(monkeypatch):
+    """When storyboard_text is provided, _gen_candidate does NOT call generate_storyboard
+    and DOES pass the shared text to generate_manim_code."""
+    storyboard_calls = []
+    codegen_calls = []
+
+    async def fake_storyboard(*args, **kwargs):
+        storyboard_calls.append(args)
+        raise AssertionError("generate_storyboard must NOT be called when storyboard_text is set")
+
+    async def fake_codegen(prompt, theme_instructions="", storyboard="", metaphor_recipes="", **kw):
+        codegen_calls.append(storyboard)
+        return _good_code(0)
+
+    monkeypatch.setattr(best_of_n, "generate_storyboard", fake_storyboard)
+    monkeypatch.setattr(best_of_n, "generate_manim_code", fake_codegen)
+    monkeypatch.setattr(best_of_n, "strip_code_fences", lambda c: c)
+
+    code = run(best_of_n._gen_candidate(
+        "prompt", "theme", storyboard_text="SB-PEDAGOGICAL"
+    ))
+    assert storyboard_calls == [], "generate_storyboard should NOT be called"
+    assert codegen_calls == ["SB-PEDAGOGICAL"], "shared storyboard must reach code-gen"
+    assert "GenScene" in code
+
+
+def test_gen_candidate_still_generates_storyboard_when_empty(monkeypatch):
+    """When storyboard_text is empty (default), _gen_candidate generates its own
+    storyboard — backward-compatible with today's behavior."""
+    storyboard_calls = []
+    codegen_storyboards = []
+
+    async def fake_storyboard(prompt, metaphor_menu="", **kw):
+        storyboard_calls.append(prompt)
+        return "{}"
+
+    async def fake_codegen(prompt, theme_instructions="", storyboard="", metaphor_recipes="", **kw):
+        codegen_storyboards.append(storyboard)
+        return _good_code(0)
+
+    monkeypatch.setattr(best_of_n, "generate_storyboard", fake_storyboard)
+    monkeypatch.setattr(best_of_n, "generate_manim_code", fake_codegen)
+    monkeypatch.setattr(best_of_n, "parse_storyboard", lambda raw: {"beats": [{}]})
+    monkeypatch.setattr(best_of_n, "format_storyboard_for_codegen", lambda sb: "SB-GENERATED")
+    monkeypatch.setattr(best_of_n, "strip_code_fences", lambda c: c)
+
+    code = run(best_of_n._gen_candidate("prompt", "theme"))
+    assert len(storyboard_calls) == 1, "generate_storyboard MUST be called when no shared storyboard"
+    assert codegen_storyboards == ["SB-GENERATED"], "generated storyboard must reach code-gen"
+    assert "GenScene" in code
+
+
+def test_select_best_code_forwards_storyboard_to_all_candidates(monkeypatch):
+    """select_best_code passes storyboard_text to every _gen_candidate call."""
+    seen_storyboards = []
+
+    async def fake_gen(prompt, theme, metaphor_menu="", metaphor_recipes="", storyboard_text=""):
+        seen_storyboards.append(storyboard_text)
+        return _good_code(len(seen_storyboards))
+
+    async def fake_render(code, chat_id, idx, quality, fps):
+        return Path(f"tmp/draft_{idx}.mp4")
+
+    async def fake_score(video, prompt, code):
+        return 5.0
+
+    monkeypatch.setattr(best_of_n, "_gen_candidate", fake_gen)
+    monkeypatch.setattr(best_of_n, "_render_draft", fake_render)
+    monkeypatch.setattr(best_of_n, "_score", fake_score)
+
+    run(best_of_n.select_best_code(
+        "p", "theme", n=3, chat_id=1,
+        storyboard_text="SHARED-PEDAGOGICAL-SB",
+    ))
+    assert len(seen_storyboards) == 3, f"expected 3 candidates, got {len(seen_storyboards)}"
+    assert all(sb == "SHARED-PEDAGOGICAL-SB" for sb in seen_storyboards), \
+        "every candidate must receive the shared storyboard"

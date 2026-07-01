@@ -1,0 +1,92 @@
+[
+  {
+    "scene": "scene08_latex_heavy",
+    "label": "defect",
+    "flagged": false,
+    "detail": "score=10 issues=0: "
+  },
+  {
+    "scene": "broken01_offframe",
+    "label": "defect",
+    "flagged": true,
+    "detail": "score=1 issues=4: Objects and text are cut off at the right edge of "
+  },
+  {
+    "scene": "broken02_overlap",
+    "label": "defect",
+    "flagged": true,
+    "detail": "score=4 issues=3: Doubled / ghosted outlines: In frames 3, 4, and 5,"
+  },
+  {
+    "scene": "broken03_tinytext",
+    "label": "defect",
+    "flagged": true,
+    "detail": "score=4 issues=2: Unreadable text: The body text is rendered extreme"
+  },
+  {
+    "scene": "broken04_samecolor",
+    "label": "defect",
+    "flagged": true,
+    "detail": "score=3 issues=3: Unreadable text: The body text 'the contrast of th"
+  },
+  {
+    "scene": "broken05_origin_stack",
+    "label": "defect",
+    "flagged": true,
+    "detail": "score=4 issues=4: Muddy translucent fills: The red square and blue c"
+  },
+  {
+    "scene": "scene01_function_plot",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=5 issues=4: Stray white artifact/mark visible at the top cente"
+  },
+  {
+    "scene": "scene02_equation_morph",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=4 issues=4: Frame 1 displays '(a + 1' which appears to be a ty"
+  },
+  {
+    "scene": "scene03_valuetracker_dot",
+    "label": "clean",
+    "flagged": false,
+    "detail": "score=10 issues=0: "
+  },
+  {
+    "scene": "scene04_camera_pushin",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=5 issues=5: Frame 1 contains incomplete and cut-off text '(1,'"
+  },
+  {
+    "scene": "scene05_true_3d",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=6 issues=3: Stray white triangular markers (resembling mouse c"
+  },
+  {
+    "scene": "scene06_riemann_area",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=5 issues=4: Muddy fill in the final frame: the area under the "
+  },
+  {
+    "scene": "scene07_grid_transform",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=5 issues=3: Ghosted/doubled outlines: In frames 4 and 5, faint"
+  },
+  {
+    "scene": "scene09_staggered_reveal",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=6 issues=2: Frame 1 is nearly empty with only faint, low-contr"
+  },
+  {
+    "scene": "scene10_vectors",
+    "label": "clean",
+    "flagged": true,
+    "detail": "score=6 issues=3: Frame 2 contains a tiny, isolated white dot in the"
+  }
+]

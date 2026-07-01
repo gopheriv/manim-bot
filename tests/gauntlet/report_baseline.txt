@@ -1,0 +1,20 @@
+=== baseline critic vs labeled set ===
+scene                        truth    flagged   detail
+scene08_latex_heavy          defect   pass      score=10 issues=0: 
+broken01_offframe            defect   FLAG      score=1 issues=4: Objects and text are cut off at the right 
+broken02_overlap             defect   FLAG      score=4 issues=3: Doubled / ghosted outlines: In frames 3, 4
+broken03_tinytext            defect   FLAG      score=4 issues=2: Unreadable text: The body text is rendered
+broken04_samecolor           defect   FLAG      score=3 issues=3: Unreadable text: The body text 'the contra
+broken05_origin_stack        defect   FLAG      score=4 issues=4: Muddy translucent fills: The red square an
+scene01_function_plot        clean    FLAG      score=5 issues=4: Stray white artifact/mark visible at the t
+scene02_equation_morph       clean    FLAG      score=4 issues=4: Frame 1 displays '(a + 1' which appears to
+scene03_valuetracker_dot     clean    pass      score=10 issues=0: 
+scene04_camera_pushin        clean    FLAG      score=5 issues=5: Frame 1 contains incomplete and cut-off te
+scene05_true_3d              clean    FLAG      score=6 issues=3: Stray white triangular markers (resembling
+scene06_riemann_area         clean    FLAG      score=5 issues=4: Muddy fill in the final frame: the area un
+scene07_grid_transform       clean    FLAG      score=5 issues=3: Ghosted/doubled outlines: In frames 4 and 
+scene09_staggered_reveal     clean    FLAG      score=6 issues=2: Frame 1 is nearly empty with only faint, l
+scene10_vectors              clean    FLAG      score=6 issues=3: Frame 2 contains a tiny, isolated white do
+TP=5 FP=8 TN=1 FN=1 errors=0 | precision=38% recall=83%
+MISSED DEFECTS (recall failures): scene08_latex_heavy
+FALSE ALARMS (precision failures): scene01_function_plot, scene02_equation_morph, scene04_camera_pushin, scene05_true_3d, scene06_riemann_area, scene07_grid_transform, scene09_staggered_reveal, scene10_vectors

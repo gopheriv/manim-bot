@@ -196,3 +196,87 @@ def test_validate_allows_many_beats_for_deep_topics():
     sb["key_points"] = ["a", "b", "c", "d", "e", "f"]
     issues = validate_storyboard(sb)
     assert not any("is a lot" in i for i in issues)  # 12 beats no longer flagged
+
+
+# ── Phase 2: pedagogical flag ─────────────────────────────────────────────────
+
+def test_pedagogical_false_no_change():
+    """pedagogical=False produces a prompt without the pedagogy directive."""
+    p = build_storyboard_prompt(depth="standard", pedagogical=False)
+    assert "5-STAGE ARC" not in p
+    assert "PREEMPT ONE MISCONCEPTION" not in p
+
+
+def test_pedagogical_true_injects_directive():
+    """pedagogical=True injects the full PEDAGOGY_DIRECTIVE."""
+    p = build_storyboard_prompt(depth="deep", pedagogical=True)
+    assert "5-STAGE ARC" in p
+    assert "hook" in p
+    assert "intuition" in p
+    assert "formalize" in p
+    assert "generalize" in p
+    assert "payoff" in p
+    assert "misconception" in p.lower()
+    assert "spine_metaphor" in p.lower()
+
+
+# ── Phase 3: optional pedagogical IR fields ──────────────────────────────────
+
+def test_old_storyboard_still_parses_without_new_fields():
+    """An old-style storyboard (no misconception/spine_metaphor/stage/pause_after)
+    still parses and formats exactly as before."""
+    sb = _good_sb()
+    assert "misconception" not in sb
+    assert "spine_metaphor" not in sb
+    for b in sb["beats"]:
+        assert "stage" not in b
+        assert "pause_after" not in b
+    parsed = parse_storyboard(json.dumps(sb))
+    assert parsed is not None
+    spec = format_storyboard_for_codegen(parsed)
+    assert "STORYBOARD" in spec
+    assert "Misconception to defuse" not in spec
+    assert "Spine metaphor" not in spec
+    assert "stage:" not in spec
+    assert "self.wait(" not in spec or "absorption" not in spec
+
+
+def test_new_pedagogical_fields_parse_and_format():
+    """A storyboard with the new optional fields parses and formats correctly."""
+    sb = _good_sb()
+    sb["misconception"] = "Learners think Fourier is just about adding sine waves"
+    sb["spine_metaphor"] = "A prism splitting white light into colors"
+    for b in sb["beats"]:
+        b["stage"] = "hook"  # all same for simplicity
+        b["pause_after"] = 1.0
+    sb["beats"][0]["stage"] = "hook"
+    sb["beats"][1]["stage"] = "intuition"
+    sb["beats"][2]["stage"] = "formalize"
+    sb["beats"][3]["stage"] = "payoff"
+
+    parsed = parse_storyboard(json.dumps(sb))
+    assert parsed is not None
+    assert parsed["misconception"] == "Learners think Fourier is just about adding sine waves"
+    assert parsed["spine_metaphor"] == "A prism splitting white light into colors"
+
+    spec = format_storyboard_for_codegen(parsed)
+    assert "Misconception to defuse:" in spec
+    assert "Fourier" in spec
+    assert "Spine metaphor" in spec
+    assert "prism" in spec
+    assert "stage: hook" in spec
+    assert "stage: intuition" in spec
+    assert "stage: formalize" in spec
+    assert "stage: payoff" in spec
+    assert "then self.wait(1) for absorption" in spec
+
+
+def test_pause_after_zero_or_missing_not_emitted():
+    """pause_after of 0 or missing should not produce a wait instruction."""
+    sb = _good_sb()
+    sb["beats"][0]["pause_after"] = 0
+    # beats 1-3 have no pause_after
+    parsed = parse_storyboard(json.dumps(sb))
+    spec = format_storyboard_for_codegen(parsed)
+    assert "self.wait(0)" not in spec
+    assert "absorption" not in spec

@@ -15,7 +15,7 @@ from typing import Callable
 
 import psutil
 
-from common import CREATE_NO_WINDOW
+from common import CREATE_NO_WINDOW, extract_python_code
 from code_safety import validate_code_safety
 from render_tier import Tier, get_tier
 
@@ -485,7 +485,11 @@ def _write_scene(code: str, chat_id: int) -> Path:
     SCENE_DIR.mkdir(parents=True, exist_ok=True)
     (RENDER_DIR / "media").mkdir(parents=True, exist_ok=True)
     scene_file = SCENE_DIR / f"scene_{chat_id}.py"
-    scene_file.write_text(code, encoding="utf-8")
+    # Final guard: strip any prose/markdown a model wrapped the code in before it
+    # reaches the .py file. Generation already does this, but sanitising at the
+    # write boundary makes a leaked preamble (the "I'll fix ...:" SyntaxError)
+    # impossible regardless of which path produced `code`.
+    scene_file.write_text(extract_python_code(code), encoding="utf-8")
     return scene_file
 
 

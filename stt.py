@@ -11,6 +11,9 @@ import logging
 from pathlib import Path
 
 import imageio_ffmpeg
+
+from common import CREATE_NO_WINDOW
+
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 logger = logging.getLogger(__name__)

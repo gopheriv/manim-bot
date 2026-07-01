@@ -1,0 +1,92 @@
+[
+  {
+    "scene": "scene08_latex_heavy",
+    "label": "defect",
+    "flagged": null,
+    "detail": "TimeoutError: "
+  },
+  {
+    "scene": "broken01_offframe",
+    "label": "defect",
+    "flagged": true,
+    "detail": "high=2 top=A gold circular shape is visibly cut off by the "
+  },
+  {
+    "scene": "broken02_overlap",
+    "label": "defect",
+    "flagged": true,
+    "detail": "high=1 top=In the settled final frames (3-5), the equation "
+  },
+  {
+    "scene": "broken03_tinytext",
+    "label": "defect",
+    "flagged": true,
+    "detail": "high=1 top=The explanatory text 'The crucial explanation to"
+  },
+  {
+    "scene": "broken04_samecolor",
+    "label": "defect",
+    "flagged": true,
+    "detail": "high=1 top=The text line 'the contrast of this line is far "
+  },
+  {
+    "scene": "broken05_origin_stack",
+    "label": "defect",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene01_function_plot",
+    "label": "clean",
+    "flagged": true,
+    "detail": "high=1 top=The plotted parabola curve extends beyond the to"
+  },
+  {
+    "scene": "scene02_equation_morph",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene03_valuetracker_dot",
+    "label": "clean",
+    "flagged": null,
+    "detail": "TimeoutError: "
+  },
+  {
+    "scene": "scene04_camera_pushin",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene05_true_3d",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene06_riemann_area",
+    "label": "clean",
+    "flagged": true,
+    "detail": "high=1 top=The blue function curve extends off the top-righ"
+  },
+  {
+    "scene": "scene07_grid_transform",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene09_staggered_reveal",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene10_vectors",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  }
+]

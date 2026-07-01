@@ -1,7 +1,5 @@
 """Judge rejection memory — record rejected defects (reason + code) so the
 generator is warned and never repeats the same mistake."""
-import importlib
-from pathlib import Path
 
 import pytest
 

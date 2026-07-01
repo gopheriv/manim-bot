@@ -12,7 +12,8 @@ import logging
 
 from config import GPT_MODEL
 from critic_agent import critique_code
-from llm import gpt_coding_client, strip_code_fences
+from common import extract_python_code
+from llm import gpt_coding_client
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ async def generate_debate_entry(prompt: str, theme_instructions: str, client_id:
             timeout=180,
             extra_body={"enable_thinking": False},
         )
-        code = strip_code_fences(response.choices[0].message.content or "")
+        code = extract_python_code(response.choices[0].message.content or "")
         logger.info(f"Debate agent {client_id} generated {len(code)} chars")
         return code
     except Exception as e:

@@ -40,11 +40,13 @@ class FakeGh:
         self.calls.append(args)
         a = list(args)
         if a[0] == "api":
-            # ensure_worker_current: GET returns our local copy (already in sync,
-            # so no push); PUT (if ever reached) just succeeds.
+            # ensure_worker_current: GET returns the matching local copy per path
+            # (every tracked file already in sync, so no push); PUT (if ever
+            # reached) just succeeds.
             if "-X" in a and a[a.index("-X") + 1] == "PUT":
                 return 0, json.dumps({"commit": {"sha": "deadbeef"}}), ""
-            content = base64.b64encode(cr._LOCAL_CI_RENDER.read_bytes()).decode("ascii")
+            local = cr._LOCAL_WORKFLOW if a[1].endswith("render.yml") else cr._LOCAL_CI_RENDER
+            content = base64.b64encode(local.read_bytes()).decode("ascii")
             return 0, json.dumps({"content": content, "sha": "remote-sha"}), ""
         if a[:2] == ["workflow", "run"]:
             return 0, "", ""
@@ -157,31 +159,41 @@ def test_failed_conclusion(monkeypatch):
 
 
 class SyncGh:
-    """Async `gh` stand-in that records PUTs and serves a configurable GET."""
-    def __init__(self, get_rc=0, get_content=None, get_sha="remote-sha"):
+    """Async `gh` stand-in that records PUTs and serves a per-file GET.
+
+    By default every tracked file's GET returns the matching LOCAL bytes (so the
+    worker is in sync and nothing is pushed). ``get_rc!=0`` simulates a 404 for
+    every file; ``stale=True`` serves drifted content for every file (forcing a
+    push of each).
+    """
+    def __init__(self, get_rc=0, stale=False, get_sha="remote-sha"):
         self.get_rc = get_rc
-        self.get_content = get_content
+        self.stale = stale
         self.get_sha = get_sha
         self.puts = []
+
+    @staticmethod
+    def _local_for(path_arg: str) -> bytes:
+        local = cr._LOCAL_WORKFLOW if path_arg.endswith("render.yml") else cr._LOCAL_CI_RENDER
+        return local.read_bytes()
 
     async def __call__(self, *args, timeout=60):
         a = list(args)
         if a[0] == "api" and "-X" in a and a[a.index("-X") + 1] == "PUT":
             self.puts.append(a)
             return 0, json.dumps({"commit": {"sha": "newsha"}}), ""
-        if a[0] == "api":  # GET contents
+        if a[0] == "api":  # GET contents — a[1] is "repos/<repo>/contents/<path>"
             if self.get_rc != 0:
                 return self.get_rc, "", "Not Found"
-            body = {"sha": self.get_sha}
-            if self.get_content is not None:
-                body["content"] = base64.b64encode(self.get_content).decode("ascii")
+            content = b"# stale worker copy\n" if self.stale else self._local_for(a[1])
+            body = {"sha": self.get_sha, "content": base64.b64encode(content).decode("ascii")}
             return 0, json.dumps(body), ""
         return 0, "", ""
 
 
 def test_ensure_worker_current_noop_when_in_sync(monkeypatch):
     _cfg(monkeypatch)
-    fake = SyncGh(get_content=cr._LOCAL_CI_RENDER.read_bytes())
+    fake = SyncGh()  # every tracked file's remote == local
     monkeypatch.setattr(cr, "_gh", fake)
     assert run(cr.ensure_worker_current()) is True
     assert fake.puts == []  # identical content → no push
@@ -189,28 +201,39 @@ def test_ensure_worker_current_noop_when_in_sync(monkeypatch):
 
 def test_ensure_worker_current_pushes_on_drift(monkeypatch):
     _cfg(monkeypatch)
-    fake = SyncGh(get_content=b"# stale worker copy\n")
+    fake = SyncGh(stale=True)  # every tracked file differs
     monkeypatch.setattr(cr, "_gh", fake)
     assert run(cr.ensure_worker_current()) is True
-    assert len(fake.puts) == 1
-    assert "sha=remote-sha" in fake.puts[0]  # update carries the blob sha
+    assert len(fake.puts) == len(cr._WORKER_FILES)  # each drifted file pushed
+    assert all("sha=remote-sha" in put for put in fake.puts)  # updates carry the blob sha
 
 
 def test_ensure_worker_current_creates_when_missing(monkeypatch):
     _cfg(monkeypatch)
-    fake = SyncGh(get_rc=1)  # 404 → file absent on worker
+    fake = SyncGh(get_rc=1)  # 404 → files absent on worker
     monkeypatch.setattr(cr, "_gh", fake)
     assert run(cr.ensure_worker_current()) is True
-    assert len(fake.puts) == 1
-    assert not any(x.startswith("sha=") for x in fake.puts[0])  # create, no sha
+    assert len(fake.puts) == len(cr._WORKER_FILES)
+    assert all(not any(x.startswith("sha=") for x in put) for put in fake.puts)  # create, no sha
+
+
+def test_ensure_worker_current_syncs_workflow(monkeypatch):
+    # The workflow file is mirrored too, so an actions-version bump in render.yml
+    # actually reaches the worker (the permanent cure for the Node 20 warning).
+    _cfg(monkeypatch)
+    fake = SyncGh(stale=True)
+    monkeypatch.setattr(cr, "_gh", fake)
+    assert run(cr.ensure_worker_current()) is True
+    pushed_paths = [p for put in fake.puts for p in put if "contents/" in p]
+    assert any(p.endswith(".github/workflows/render.yml") for p in pushed_paths)
 
 
 def test_ensure_worker_current_cached(monkeypatch):
     _cfg(monkeypatch)
-    fake = SyncGh(get_content=cr._LOCAL_CI_RENDER.read_bytes())
+    fake = SyncGh()  # in sync
     monkeypatch.setattr(cr, "_gh", fake)
     assert run(cr.ensure_worker_current()) is True
-    fake2 = SyncGh(get_content=b"different")
+    fake2 = SyncGh(stale=True)
     monkeypatch.setattr(cr, "_gh", fake2)
     assert run(cr.ensure_worker_current()) is True  # cached → skips re-check
     assert fake2.puts == []

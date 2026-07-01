@@ -1,0 +1,92 @@
+[
+  {
+    "scene": "scene08_latex_heavy",
+    "label": "defect",
+    "flagged": null,
+    "detail": "TimeoutError: "
+  },
+  {
+    "scene": "broken01_offframe",
+    "label": "defect",
+    "flagged": true,
+    "detail": "high=2 top=A gold circle arc is visibly cut off by the top "
+  },
+  {
+    "scene": "broken02_overlap",
+    "label": "defect",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "broken03_tinytext",
+    "label": "defect",
+    "flagged": true,
+    "detail": "high=1 top=The explanatory text sentence is rendered extrem"
+  },
+  {
+    "scene": "broken04_samecolor",
+    "label": "defect",
+    "flagged": true,
+    "detail": "high=2 top=The body text 'the contrast of this line is far "
+  },
+  {
+    "scene": "broken05_origin_stack",
+    "label": "defect",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene01_function_plot",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene02_equation_morph",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene03_valuetracker_dot",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene04_camera_pushin",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene05_true_3d",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene06_riemann_area",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene07_grid_transform",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene09_staggered_reveal",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  },
+  {
+    "scene": "scene10_vectors",
+    "label": "clean",
+    "flagged": false,
+    "detail": "high=0 top=clean"
+  }
+]
