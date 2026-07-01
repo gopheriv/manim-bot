@@ -21,6 +21,9 @@ tmp/
 *.db
 *.sqlite
 
+# Scratch / debug scripts (underscore-prefixed throwaways, machine-specific)
+scripts/_*.py
+
 # IDE
 .vscode/
 .idea/
