@@ -9,6 +9,7 @@ import ast
 import base64
 import gzip
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,42 @@ _BANNED_DUNDERS = {
 }
 
 
+# Inlined twin of common.extract_python_code (this worker is a single self-
+# contained file with NO project deps). A code-gen model — especially on a
+# self-heal turn told to "fix the issues" — often prefixes prose before the
+# ```python block ("I'll fix the two correctness issues identified by the
+# Judge:"). That sentence was written verbatim into scene.py and the apostrophe
+# in "I'll" raised `SyntaxError: unterminated string literal` here. We strip any
+# such wrapping at the worker boundary so a leaked preamble can NEVER reach
+# py_compile, no matter which bot version dispatched the job. Keep in sync.
+_FENCED_BLOCK_RE = re.compile(r"```[^\S\r\n]*[A-Za-z0-9_+-]*[^\S\r\n]*\r?\n(.*?)```", re.DOTALL)
+_OPEN_FENCE_RE = re.compile(r"(?m)^[^\S\r\n]*```[^\S\r\n]*[A-Za-z0-9_+-]*[^\S\r\n]*\r?\n")
+_STRAY_FENCE_LINE_RE = re.compile(r"(?m)^[^\S\r\n]*```.*\r?\n?")
+_CODE_LINE_RE = re.compile(
+    r'^[^\S\r\n]*(?:from\s+[.\w]|import\s+\w|#|@\w|class\s+\w|(?:async\s+)?def\s+\w|"""|\'\'\')'
+)
+
+
+def extract_python_code(text: str) -> str:
+    """Strip any LLM prose/markdown wrapping so only runnable Python remains."""
+    if not text:
+        return ""
+    s = text.strip()
+    blocks = _FENCED_BLOCK_RE.findall(s)
+    if blocks:
+        return max(blocks, key=lambda b: (any(k in b for k in ("import ", "class ", "def ")), len(b))).strip("\r\n")
+    open_fence = _OPEN_FENCE_RE.search(s)
+    if open_fence:
+        s = s[open_fence.end():]
+    else:
+        lines = s.splitlines()
+        for i, line in enumerate(lines):
+            if _CODE_LINE_RE.match(line):
+                s = "\n".join(lines[i:])
+                break
+    return _STRAY_FENCE_LINE_RE.sub("", s).strip("\r\n")
+
+
 def _unsafe_reasons(code: str) -> list:
     """Return a list of safety violations (empty = safe). Syntax errors are not
     our concern here — the py_compile step below reports those."""
@@ -64,8 +101,10 @@ def _unsafe_reasons(code: str) -> list:
     return [r for r in reasons if not (r in seen or seen.add(r))]
 
 # Hard cap on the Manim render so a generated infinite loop can't pin a runner.
-# Must stay <= the workflow's `timeout-minutes` (render.yml) or GitHub cancels the
-# job first. Overridable via env for genuinely long legitimate renders.
+# Must stay COMFORTABLY BELOW the workflow's `timeout-minutes` (render.yml, 90 min)
+# minus the apt/pip setup steps, so THIS graceful timeout (with its helpful
+# message) fires before GitHub hard-cancels the job. Overridable via env for
+# genuinely long legitimate renders.
 RENDER_TIMEOUT_S = int(os.environ.get("CI_RENDER_TIMEOUT", "3600"))  # 60 min
 COMPILE_TIMEOUT_S = 60
 
@@ -109,6 +148,11 @@ def main() -> None:
         code = gzip.decompress(base64.b64decode(blob)).decode("utf-8")
     except Exception as e:  # noqa: BLE001
         fail(f"could not decode CODE_GZ: {e}")
+
+    # Strip any LLM prose/markdown wrapping BEFORE any check or write. A leaked
+    # "I'll fix ...:" preamble would otherwise become scene.py line 1 and raise a
+    # SyntaxError. This is the permanent, version-independent guard.
+    code = extract_python_code(code)
 
     if "class GenScene" not in code or "def construct" not in code:
         fail("scene must define class GenScene with a construct method")

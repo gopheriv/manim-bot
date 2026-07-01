@@ -35,6 +35,8 @@ Output ONLY valid JSON (no markdown fences) with EXACTLY this shape:
 {
   "title": "short title",
   "concept": "the ONE idea the viewer should understand by the end",
+  "misconception": "(OPTIONAL) the single most common place learners get stuck — name it so a beat can defuse it",
+  "spine_metaphor": "(OPTIONAL) one visual through-line carried across ALL beats — don't switch metaphors",
   "key_points": ["ordered sub-ideas the film MUST cover: definition, intuition, derivation step(s), worked example, common misconception/edge case, recap"],
   "duration_target_s": 30,
   "palette": {"known": "#hex", "focus": "#hex", "result": "#hex", "transform": "#hex", "bg": "#hex"},
@@ -43,6 +45,7 @@ Output ONLY valid JSON (no markdown fences) with EXACTLY this shape:
       "id": "b1",
       "name": "hook | build | develop | insight | resolution",
       "purpose": "WHY this beat exists — the question it answers or the curiosity it creates",
+      "stage": "(OPTIONAL) one of: hook, intuition, formalize, generalize, payoff",
       "start_s": 0,
       "end_s": 4,
       "objects": ["named objects on screen this beat, e.g. axes, curve f(x), tangent line"],
@@ -51,6 +54,7 @@ Output ONLY valid JSON (no markdown fences) with EXACTLY this shape:
       "transition_in": "how this beat enters from the previous (e.g. ReplacementTransform the equation, FadeTransform, GrowFromCenter)",
       "emphasis": "where the viewer's eye should land",
       "covers": ["which key_point(s) from the top-level list this beat realizes"],
+      "pause_after": "(OPTIONAL) seconds to wait after this beat for absorption (0.5-1.5 typical)",
       "narration": "1-3 sentences that actually TEACH this point, conversational"
     }
   ]
@@ -80,6 +84,7 @@ def build_storyboard_prompt(
     hard_constraints: list[str] | None = None,
     depth: str = "standard",
     metaphor_menu: str = "",
+    pedagogical: bool = False,
 ) -> str:
     """Build the director system prompt, optionally seeded with learned lessons.
 
@@ -92,8 +97,16 @@ def build_storyboard_prompt(
     stage (so the director designs around them, instead of them being buried in a
     code-gen footer). ``hard_constraints`` are lessons that have recurred enough
     times to become non-negotiable MUST rules — surfaced most prominently.
+    ``pedagogical`` (bool): when True, inject the PEDAGOGY_DIRECTIVE (5-stage arc,
+    misconception, spine metaphor, pacing rules) so the director teaches complex
+    topics with 3Blue1Brown clarity. When False, behavior is unchanged.
     """
     sections = [STORYBOARD_SYSTEM_PROMPT]
+
+    # Pedagogical directive — injected early so it frames everything else.
+    if pedagogical:
+        from pedagogy import PEDAGOGY_DIRECTIVE
+        sections.append(PEDAGOGY_DIRECTIVE)
 
     profile = _DEPTH_PROFILES.get(depth, _DEPTH_PROFILES["standard"])
     sections.append(
@@ -251,6 +264,13 @@ def format_storyboard_for_codegen(sb: dict[str, Any]) -> str:
     lines.append("## STORYBOARD — implement EXACTLY, beat by beat (this is the director's plan)")
     if sb.get("concept"):
         lines.append(f"Concept (what the viewer must understand): {sb['concept']}")
+    # Pedagogical fields — surface when present (backward-compatible: absent = no output)
+    misconception = str(sb.get("misconception") or "").strip()
+    if misconception:
+        lines.append(f"Misconception to defuse: {misconception}")
+    spine_metaphor = str(sb.get("spine_metaphor") or "").strip()
+    if spine_metaphor:
+        lines.append(f"Spine metaphor (carry across ALL beats): {spine_metaphor}")
     key_points = sb.get("key_points")
     if isinstance(key_points, list) and key_points:
         lines.append("COVER EVERY POINT (the beats must collectively teach all of these):")
@@ -267,6 +287,9 @@ def format_storyboard_for_codegen(sb: dict[str, Any]) -> str:
         s, e = _fmt_time(b.get("start_s")), _fmt_time(b.get("end_s"))
         lines.append(f"BEAT {i} — {b.get('name','')} ({s}-{e}s)")
         lines.append(f"  purpose: {b.get('purpose','')}")
+        stage = str(b.get("stage") or "").strip().lower()
+        if stage:
+            lines.append(f"  stage: {stage}")
         objs = b.get("objects")
         if objs:
             lines.append(f"  objects: {', '.join(map(str, objs)) if isinstance(objs, list) else objs}")
@@ -285,6 +308,14 @@ def format_storyboard_for_codegen(sb: dict[str, Any]) -> str:
             lines.append(f"  covers: {', '.join(map(str, covers)) if isinstance(covers, list) else covers}")
         if b.get("narration"):
             lines.append(f"  narration: \"{b['narration']}\"")
+        pause = b.get("pause_after")
+        if pause is not None:
+            try:
+                pause_val = float(pause)
+                if pause_val > 0:
+                    lines.append(f"  then self.wait({pause_val:g}) for absorption")
+            except (TypeError, ValueError):
+                pass
         lines.append("")
     lines.append(
         "Implement EVERY beat in order. Honor the timings (run_time + self.wait), the camera "

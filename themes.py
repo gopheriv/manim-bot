@@ -135,6 +135,45 @@ THREE_BLUE_ONE_BROWN = Theme(
     colors=["#1C758A", "#FFFF00", "#29ABCA", "#FC6255", "#ECECEC"],
 )
 
+BLUEPRINT = Theme(
+    name="Blueprint",
+    bg_color="#1A2744",
+    palette_desc=(
+        "Use a blueprint-style palette on a deep navy background (#1A2744): cyan-blue "
+        "(#64B5F6) for primary objects and grid lines, bright white (#FFFFFF) for text and "
+        "labels, warm amber (#FFB74D) for the active insight, soft steel blue (#4FC3F7) for "
+        "transformations, and muted red (#EF5350) for contrast or warnings. The feel is "
+        "technical, precise, and engineering-like — like reading a well-drawn blueprint."
+    ),
+    extra_instructions=(
+        "Use thin, precise lines (stroke_width=2) with a technical-drawing feel. "
+        "Add faint guide lines or grid hints where helpful (opacity 0.3). "
+        "Keep spacing clean and avoid overlapping objects — everything should feel "
+        "measured and intentional, like an engineering schematic."
+    ),
+    colors=["#64B5F6", "#FFB74D", "#4FC3F7", "#EF5350", "#FFFFFF"],
+)
+
+COLORSAFE = Theme(
+    name="ColorSafe",
+    bg_color="#101418",
+    palette_desc=(
+        "Use a color-blind-safe palette (Okabe-Ito) on a near-black background (#101418): "
+        "sky-blue (#56B4E9) for primary objects, orange (#E69F00) for the active insight, "
+        "bluish-green (#009E73) for transformations, and vermillion (#D55E00) for contrast "
+        "or warnings. Text in bright white (#FFFFFF). These colors remain distinguishable "
+        "under red-green color blindness (deuteranopia), making the animation accessible to "
+        "the ~8% of men who cannot distinguish red from green. NEVER use red+green together "
+        "to carry meaning."
+    ),
+    extra_instructions=(
+        "Use color semantically and consistently. Avoid red/green pairs for contrasting "
+        "objects — use the sky-blue, orange, bluish-green, and vermillion from the palette "
+        "instead. These are proven distinguishable under deuteranopia simulation."
+    ),
+    colors=["#56B4E9", "#E69F00", "#009E73", "#D55E00", "#FFFFFF"],
+)
+
 
 # ── Theme Registry ───────────────────────────────────────────────────────────
 
@@ -145,9 +184,14 @@ ALL_THEMES: dict[str, Theme] = {
     "nord": NORD,
     "cyberpunk": CYBERPUNK,
     "chalkboard": CHALKBOARD,
+    "blueprint": BLUEPRINT,
+    "colorsafe": COLORSAFE,
 }
 
-THEME_ORDER = ["visual_math", "threeblue1brown", "default", "nord", "cyberpunk", "chalkboard"]
+THEME_ORDER = [
+    "visual_math", "threeblue1brown", "default", "nord",
+    "cyberpunk", "chalkboard", "blueprint", "colorsafe",
+]
 
 
 def get_theme(name: str) -> Theme:
@@ -176,3 +220,81 @@ def build_theme_prompt(theme: Theme) -> str:
     if theme.extra_instructions:
         parts.append(theme.extra_instructions)
     return "\n".join(parts)
+
+
+# ── WCAG Contrast Ratio ──────────────────────────────────────────────────────
+
+def _srgb_to_linear(hex_color: str) -> tuple[float, float, float]:
+    """Convert a '#rrggbb' hex color to linearized sRGB components (0.0–1.0)."""
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16) / 255.0
+    g = int(hex_color[2:4], 16) / 255.0
+    b = int(hex_color[4:6], 16) / 255.0
+    return r, g, b
+
+
+def _linearize(c: float) -> float:
+    """Linearize a single sRGB channel per WCAG 2.x spec."""
+    return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _relative_luminance(hex_color: str) -> float:
+    """Compute WCAG relative luminance from a '#rrggbb' hex color."""
+    r, g, b = _srgb_to_linear(hex_color)
+    return 0.2126 * _linearize(r) + 0.7152 * _linearize(g) + 0.0722 * _linearize(b)
+
+
+def contrast_ratio(hex1: str, hex2: str) -> float:
+    """Compute the WCAG contrast ratio between two '#rrggbb' colors.
+
+    Returns a value >= 1.0 (higher = more readable).
+    Formula: (L_lighter + 0.05) / (L_darker + 0.05)
+    """
+    l1 = _relative_luminance(hex1)
+    l2 = _relative_luminance(hex2)
+    lighter = max(l1, l2)
+    darker = min(l1, l2)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+# ── Color-Blindness Simulation ───────────────────────────────────────────────
+
+def _hex_to_rgb255(hex_color: str) -> tuple[int, int, int]:
+    """Convert '#rrggbb' to (R, G, B) in 0..255."""
+    hex_color = hex_color.lstrip("#")
+    return (
+        int(hex_color[0:2], 16),
+        int(hex_color[2:4], 16),
+        int(hex_color[4:6], 16),
+    )
+
+
+def _rgb255_to_hex(r: int, g: int, b: int) -> str:
+    """Convert (R, G, B) in 0..255 to '#rrggbb'."""
+    return f"#{max(0, min(255, r)):02X}{max(0, min(255, g)):02X}{max(0, min(255, b)):02X}"
+
+
+def simulate_deuteranopia(hex_color: str) -> str:
+    """Simulate red-green color blindness (deuteranopia) for a '#rrggbb' color.
+
+    Uses the standard Brettel / Viénot-inspired sRGB matrix:
+        R' = 0.625*R + 0.375*G + 0.000*B
+        G' = 0.700*R + 0.300*G + 0.000*B
+        B' = 0.000*R + 0.300*G + 0.700*B
+    Values are rounded and clamped to 0..255.
+    """
+    r, g, b = _hex_to_rgb255(hex_color)
+    r2 = round(0.625 * r + 0.375 * g + 0.000 * b)
+    g2 = round(0.700 * r + 0.300 * g + 0.000 * b)
+    b2 = round(0.000 * r + 0.300 * g + 0.700 * b)
+    return _rgb255_to_hex(r2, g2, b2)
+
+
+def color_distance(hex1: str, hex2: str) -> float:
+    """Euclidean distance between two '#rrggbb' colors in RGB (0..255) space.
+
+    Returns sqrt(dR² + dG² + dB²). Max possible is ~441.67 (black to white).
+    """
+    r1, g1, b1 = _hex_to_rgb255(hex1)
+    r2, g2, b2 = _hex_to_rgb255(hex2)
+    return ((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2) ** 0.5

@@ -40,7 +40,7 @@ eigen_pairs = [
 eigen_arrows = VGroup()
 eigen_labels = VGroup()
 for eigenval, eigenvec in eigen_pairs:
-    vec_line = Arrow(ORIGIN, 2.5 * eigenvec[:2], buff=0, color="#10B981", stroke_width=3)
+    vec_line = Arrow(ORIGIN, 2.5 * eigenvec, buff=0, color="#10B981", stroke_width=3)
     val_label = MathTex(rf"\\lambda = {{eigenval:.2f}}", font_size=24, color="#10B981")
     val_label.next_to(vec_line.get_end(), RIGHT + UP)
     eigen_arrows.add(vec_line)
@@ -63,7 +63,7 @@ self.play(
 new_vecs = VGroup()
 for eigenval, eigenvec in eigen_pairs:
     new_end = transform_point(2.5 * eigenvec)
-    new_vec = Arrow(ORIGIN, new_end[:2], buff=0, color="#F59E0B", stroke_width=3)
+    new_vec = Arrow(ORIGIN, new_end, buff=0, color="#F59E0B", stroke_width=3)
     new_vecs.add(new_vec)
 self.play(Create(new_vecs), run_time=1)
 

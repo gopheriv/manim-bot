@@ -324,6 +324,28 @@ _REGISTRY: tuple[Metaphor, ...] = (
             "# For a true clock, place the same ticks around a Circle and hop along its arcs."
         ),
     ),
+    Metaphor(
+        name="fourier_decomposition",
+        concept="a complex waveform as a sum of simple sine waves at different frequencies",
+        triggers=("fourier", "frequency", "spectrum", "harmonic", "decompos", "waveform"),
+        visual="a complicated wave builds up as sine components stack one by one on top of each other",
+        why="a 'Fourier series' stops being a scary formula — the viewer watches simple sines "
+            "layer into a complex shape, so decomposition is assembly, not subtraction. The "
+            "epicycle version (circles-on-circles) makes the abstract sum geometrically tangible.",
+        recipe=(
+            "ax = Axes(x_range=[-2*PI, 2*PI], y_range=[-1.5, 1.5])\n"
+            "target = ax.plot(lambda x: np.sin(x) + 0.5*np.sin(3*x) + 0.3*np.sin(5*x), color=WHITE)\n"
+            "# Build the waveform one harmonic at a time:\n"
+            "h1 = ax.plot(lambda x: np.sin(x), color=BLUE)\n"
+            "h2 = ax.plot(lambda x: 0.5*np.sin(3*x), color=GREEN)\n"
+            "h3 = ax.plot(lambda x: 0.3*np.sin(5*x), color=YELLOW)\n"
+            "self.play(Create(ax), Create(h1), run_time=1.5)  # fundamental\n"
+            "self.play(Create(h2), run_time=1)                # 3rd harmonic added\n"
+            "self.play(Create(h3), run_time=1)                # 5th harmonic added\n"
+            "# Replace the stack with the combined wave — the sum is the target:\n"
+            "self.play(Transform(VGroup(h1, h2, h3), target), run_time=2)"
+        ),
+    ),
 )
 
 

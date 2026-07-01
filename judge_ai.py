@@ -38,6 +38,9 @@ from config import (
     JUDGE_TIMEOUT,
     CLAUDE_API_KEY,
     QWEN_API_KEY,
+    GLM_API_KEY,
+    GLM_BASE_URL,
+    GLM_MODEL,
 )
 
 if TYPE_CHECKING:
@@ -127,11 +130,13 @@ Be specific; "Line N" references are valued. If you are unsure whether something
 # ── Model routing — strongest available judge ────────────────────────────────
 
 def _resolve_provider() -> str | None:
-    """Return 'claude', 'qwen', 'openai', or None (no judge configured)."""
+    """Return 'claude', 'qwen', 'glm', 'openai', or None (no judge configured)."""
     if JUDGE_PROVIDER == "claude":
         return "claude" if CLAUDE_API_KEY else None
     if JUDGE_PROVIDER == "qwen":
         return "qwen" if QWEN_API_KEY else None
+    if JUDGE_PROVIDER == "glm":
+        return "glm" if GLM_API_KEY else None
     if JUDGE_PROVIDER == "openai":
         return "openai" if (JUDGE_BASE_URL and JUDGE_API_KEY) else None
     # auto: prefer the strongest model when available
@@ -139,6 +144,8 @@ def _resolve_provider() -> str | None:
         return "claude"
     if QWEN_API_KEY:
         return "qwen"
+    if GLM_API_KEY:
+        return "glm"
     if JUDGE_BASE_URL and JUDGE_API_KEY:
         return "openai"
     return None
@@ -180,6 +187,18 @@ async def _judge_complete(system_prompt: str, user_message: str) -> str:
         )
         return (response.choices[0].message.content or "").strip()
 
+    if provider == "glm":
+        from llm import glm_client
+        from config import GLM_MODEL as _GLM_MODEL
+        response = await glm_client.messages.create(
+            model=_GLM_MODEL,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+            temperature=0.1,
+            max_tokens=2048,
+        )
+        return (response.content[0].text or "").strip()
+
     if provider == "openai":
         response = await judge_client.chat.completions.create(
             model=JUDGE_MODEL,
@@ -201,7 +220,7 @@ async def _judge_complete(system_prompt: str, user_message: str) -> str:
         # rather than returning "" and silently degrading to REPAIR.
         raise RuntimeError(f"Unexpected judge response type: {type(response).__name__}")
 
-    raise RuntimeError("No judge model configured (set CLAUDE_API_KEY or JUDGE_BASE_URL/JUDGE_API_KEY)")
+    raise RuntimeError("No judge model configured (set CLAUDE_API_KEY, GLM_API_KEY, or JUDGE_BASE_URL/JUDGE_API_KEY)")
 
 
 def _safe_float(value, default: float) -> float:
@@ -327,8 +346,7 @@ async def repair_by_judge(
 ) -> str:
     """Ask the generator to fix ONLY the correctness defects the Judge found."""
     import llm  # local import keeps module load order simple; no llm→judge_ai cycle
-
-    strip_code_fences = llm.strip_code_fences
+    from common import extract_python_code
 
     repair_text = "\n".join(f"- {i}" for i in judge_review.repair_instructions) or "\n".join(
         f"- {i}" for i in judge_review.critical_issues
@@ -357,6 +375,6 @@ async def repair_by_judge(
     ]
 
     content = await llm._codegen_complete(messages, timeout=180)
-    code = strip_code_fences(content)
+    code = extract_python_code(content)
     logger.info("Code repaired by generator (%d Judge fixes)", len(judge_review.repair_instructions))
     return code

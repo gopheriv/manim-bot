@@ -54,7 +54,7 @@ _REGISTRY: tuple[Domain, ...] = (
         ),
         guidance=(
             "## DOMAIN — Calculus\n"
-            "- Plot with `axes.plot(f, x_range=[a, b])` (NOT the removed `get_graph`); "
+            "- Plot with `axes.plot(f, x_range=[a, b])` (NOT the deprecated `get_graph`); "
             "label curves with `axes.get_graph_label(...)` or a `MathTex` next to the curve.\n"
             "- Derivative: animate a `TangentLine` sliding along the curve via a `ValueTracker`; "
             "its tilt IS f'(x) — show the slope value updating.\n"
@@ -127,6 +127,54 @@ _REGISTRY: tuple[Domain, ...] = (
             "- Animate a reaction by `ReplacementTransform`-ing the reactant group into the product group.\n"
             "- Show electron movement as small dots traveling along bond paths.\n"
             "- Keep a balanced chemical equation on screen and highlight what changes."
+        ),
+    ),
+    Domain(
+        name="geometry",
+        triggers=(
+            "triangle", "pythago", "hypotenuse", "right angle", "perpendicular",
+            "polygon", "quadrilateral", "parallelogram", "rhombus", "trapezoid",
+            "circle theorem", "inscribed", "circumference", "arc length",
+            "congruen", "similar triangle", "isometric", "symmetry",
+            "angle bisect", "altitude", "median",
+            "perimeter", "area of", "heron",
+        ),
+        guidance=(
+            "## DOMAIN — Geometry\n"
+            "- Construct figures with `Polygon` (vertices as a sequence of [x,y,0] points) "
+            "and `Circle(radius=...)` or `Arc` for angles. Mark right angles with `RightAngle(line1, line2)` "
+            "and other angles with `Angle(line1, line2, radius=...)` — both are importable from `manim`.\n"
+            "- Label vertices with `Dot` + `MathTex` placed OUTSIDE the shape (use `.next_to(..., buff=0.3)`). "
+            "Label side lengths with `MathTex` near the midpoint of each edge.\n"
+            "- For a theorem proof (e.g. Pythagoras), build the figure FIRST (triangle + squares on each side), "
+            "then animate the proof step: color one square, show it equals the sum of the other two via "
+            "`ReplacementTransform` or area comparison.\n"
+            "- Keep the figure centered and uncluttered — use `self.camera.background_color` for contrast "
+            "and `stroke_width=2` for readability. Use `VGroup(...).move_to(ORIGIN)` to center."
+        ),
+    ),
+    Domain(
+        name="number_theory",
+        triggers=(
+            "prime", "primes", "composit", "factor", "divisib",
+            "modul", "modulo", "remainder", "congruen",
+            "gcd", "euclid", "lcm",
+            "fibonacci", "golden ratio",
+            "totient", "euler phi",
+            "sieve", "eratosth",
+            "perfect number",
+        ),
+        guidance=(
+            "## DOMAIN — Number theory\n"
+            "- Show integers as rows of `Dot`s or small `Square`s arranged with `VGroup.arrange()` "
+            "(e.g. 12 = 3×4 grid of dots) so divisibility is visible as regrouping.\n"
+            "- Show a prime as a number that can ONLY form a 1×n row (no internal rectangle possible). "
+            "Animate failed attempts to arrange into 2+ equal rows.\n"
+            "- Modular arithmetic: use a `NumberLine` with ticks 0..n-1, or place `Dot`s in a `Circle` "
+            "layout and animate an `Arrow` hopping +k mod n (use `Rotate` around the circle center).\n"
+            "- Fibonacci: animate growing `Square`s whose side lengths follow F_n, arranged in the golden spiral.\n"
+            "- Keep a running `MathTex` of the current relation (e.g. '12 = 3 × 4', 'gcd(48,18) = 6') "
+            "visible on screen and update it as the visual changes."
         ),
     ),
 )

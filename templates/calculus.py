@@ -35,7 +35,7 @@ self.add(curve_glow)
 self.play(Create(curve, run_time=2))
 
 # Label
-eq_label = MathTex(r"f(x) = \frac{{x^2}}{{4}} + 0.5", font_size=28, color="{color}")
+eq_label = MathTex(r"f(x) = \\frac{{x^2}}{{4}} + 0.5", font_size=28, color="{color}")
 eq_label.to_corner(UR)
 self.play(Write(eq_label, run_time=1))
 

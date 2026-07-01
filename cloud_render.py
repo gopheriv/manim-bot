@@ -40,11 +40,22 @@ def get_last_error() -> str:
     """Accessor mirroring renderer.get_last_error() — uniform error surfacing."""
     return cloud_render_last_error
 
-# The render harness lives here AND in the public worker repo (which can't read
-# this private repo at run time). `ensure_worker_current` keeps the worker copy
-# in lock-step so it can never silently go stale. Checked once per process.
+# The render harness AND the workflow definition live here AND in the public
+# worker repo (which can't read this private repo at run time).
+# `ensure_worker_current` keeps the worker copies in lock-step so they can never
+# silently go stale. Checked once per process.
 CI_RENDER_PATH = "deploy/ci_render.py"
+WORKFLOW_PATH = ".github/workflows/render.yml"
 _LOCAL_CI_RENDER = Path(__file__).parent / "deploy" / "ci_render.py"
+_LOCAL_WORKFLOW = Path(__file__).parent / ".github" / "workflows" / "render.yml"
+# Files this repo owns as the single source of truth and mirrors onto the worker.
+# render.yml is synced too so action-version bumps (e.g. the Node 20→24 actions
+# upgrade) actually reach the worker — otherwise the worker keeps running its old
+# checkout@v4 / setup-python@v5 and the deprecation warning never goes away.
+_WORKER_FILES: "list[tuple[Path, str]]" = [
+    (_LOCAL_CI_RENDER, CI_RENDER_PATH),
+    (_LOCAL_WORKFLOW, WORKFLOW_PATH),
+]
 # Re-verify the worker copy periodically rather than trusting "synced once,
 # synced forever": if the remote worker repo is changed externally, the local
 # process picks that up within the TTL instead of only on restart.
@@ -94,19 +105,60 @@ def new_job_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+async def _sync_worker_file(repo: str, local_path: Path, remote_path: str) -> bool:
+    """Push one local file to the worker repo if its copy has drifted.
+
+    Compares the worker's copy against ours and pushes (create or update) on a
+    difference — making this repo the single source of truth without storing any
+    token in the public repo. Best-effort: a read/check/push failure is logged
+    and returns False (the caller decides whether that blocks caching). Returns
+    True when the worker copy is known-current.
+    """
+    try:
+        local = local_path.read_bytes()
+    except OSError as e:  # noqa: BLE001
+        logger.warning("worker sync: cannot read %s: %s", local_path, e)
+        return False
+
+    remote_sha: str | None = None
+    rc, out, _ = await _gh("api", f"repos/{repo}/contents/{remote_path}")
+    if rc == 0:
+        try:
+            meta = json.loads(out or "{}")
+            remote_sha = meta.get("sha")
+            remote = base64.b64decode((meta.get("content") or "").replace("\n", ""))
+            if remote == local:
+                return True  # already in sync — no push needed
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass  # unparseable → fall through and overwrite
+    # rc != 0 usually means 404 (file absent) → create it below.
+
+    put = ["api", "-X", "PUT", f"repos/{repo}/contents/{remote_path}",
+           "-f", f"message=chore: sync {remote_path} from manim-bot (auto)",
+           "-f", f"content={base64.b64encode(local).decode('ascii')}"]
+    if remote_sha:
+        put += ["-f", f"sha={remote_sha}"]
+    rc, out, err = await _gh(*put)
+    if rc != 0:
+        logger.warning("worker sync push failed for %s (rc=%s): %s", remote_path, rc, (err or out).strip())
+        return False
+    logger.info("Synced %s to worker %s", remote_path, repo)
+    return True
+
+
 async def ensure_worker_current(repo: str | None = None, force: bool = False) -> bool:
-    """Push our local ci_render.py to the worker repo if it has drifted.
+    """Keep the worker repo's copies of our render harness + workflow in lock-step.
 
-    The worker is a *separate public* repo with its own copy of the render
-    harness; when that copy lags behind this one, renders fail in confusing
-    ways (e.g. searching for the wrong output filename). Before dispatching we
-    compare the worker's copy against ours and push if they differ — making
-    this repo the single source of truth without storing any token in the
-    public repo.
+    The worker is a *separate public* repo with its own copies of ci_render.py
+    and .github/workflows/render.yml; when those lag behind this repo, renders
+    fail in confusing ways (wrong output filename) or run deprecated actions.
+    Before dispatching we push any file that has drifted.
 
-    Best-effort and cached per process: a check/push failure is logged but does
-    not block the render (a truly stale worker will still surface a clear error
-    from the render itself). Returns True if the worker is known-current.
+    Best-effort and cached per process: failures are logged but never block the
+    render (a truly stale worker still surfaces a clear error from the render
+    itself). The per-process cache is only set once EVERY tracked file is
+    confirmed current, so a transient push failure is retried next dispatch.
+    Returns True if the whole worker is known-current.
     """
     global _worker_synced_at
     if not force and _worker_synced_at and (time.monotonic() - _worker_synced_at) < _WORKER_SYNC_TTL_S:
@@ -114,38 +166,15 @@ async def ensure_worker_current(repo: str | None = None, force: bool = False) ->
     repo = repo or CLOUD_RENDER_REPO
     if not repo:
         return False
-    try:
-        local = _LOCAL_CI_RENDER.read_bytes()
-    except OSError as e:  # noqa: BLE001
-        logger.warning("worker sync: cannot read %s: %s", _LOCAL_CI_RENDER, e)
-        return False
 
-    remote_sha: str | None = None
-    rc, out, _ = await _gh("api", f"repos/{repo}/contents/{CI_RENDER_PATH}")
-    if rc == 0:
-        try:
-            meta = json.loads(out or "{}")
-            remote_sha = meta.get("sha")
-            remote = base64.b64decode((meta.get("content") or "").replace("\n", ""))
-            if remote == local:
-                _worker_synced_at = time.monotonic()
-                return True  # already in sync — no push needed
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass  # unparseable → fall through and overwrite
-    # rc != 0 usually means 404 (file absent) → create it below.
+    all_current = True
+    for local_path, remote_path in _WORKER_FILES:
+        if not await _sync_worker_file(repo, local_path, remote_path):
+            all_current = False
 
-    put = ["api", "-X", "PUT", f"repos/{repo}/contents/{CI_RENDER_PATH}",
-           "-f", "message=chore: sync ci_render.py from manim-bot (auto)",
-           "-f", f"content={base64.b64encode(local).decode('ascii')}"]
-    if remote_sha:
-        put += ["-f", f"sha={remote_sha}"]
-    rc, out, err = await _gh(*put)
-    if rc != 0:
-        logger.warning("worker sync push failed (rc=%s): %s", rc, (err or out).strip())
-        return False
-    logger.info("Synced ci_render.py to worker %s", repo)
-    _worker_synced_at = time.monotonic()
-    return True
+    if all_current:
+        _worker_synced_at = time.monotonic()
+    return all_current
 
 
 async def dispatch_render(

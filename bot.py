@@ -36,6 +36,7 @@ from config import (
     CRITIC_REPAIR_THRESHOLD,
     VISUAL_CRITIC_ENABLED,
     VISUAL_CRITIC_MAX_PASSES,
+    AESTHETIC_DIRECTOR_ENABLED,
     STORYBOARD_ENABLED,
     VISUAL_METAPHORS_ENABLED,
     CHARACTER_NARRATOR_ENABLED,
@@ -93,6 +94,7 @@ from exam_prep import get_random_question, generate_animation_for_question
 from gallery import get_featured, get_by_category, get_by_id, search as gallery_search, increment_view
 from multi_agent_debate import debate_generate
 from visual_critic import critique_render
+from aesthetic_director import critique_render_panel
 from referral import register_user, get_user_referral_info
 # teacher_dashboard is an OPTIONAL feature — a broken import here must not take
 # down the whole bot. Fall back to stubs that report the feature is unavailable.
@@ -576,7 +578,12 @@ async def _send_animation(
                 # Depth profile (length + coverage) — scales with tier + prompt
                 # complexity; constrained tier stays 'compact' to keep local safe.
                 depth = recommend_depth(prompt, tier)
-                logger.info("Depth profile: %s (tier=%s)", depth, tier.name)
+                # Pedagogical mode: complex topics (depth="deep") get the
+                # 5-stage arc, misconception defusing, and spine metaphor.
+                # Simple/medium topics on capable tiers and ALL constrained-tier
+                # topics get the standard storyboard (no extra cost).
+                pedagogical = (depth == "deep")
+                logger.info("Depth profile: %s (tier=%s, pedagogical=%s)", depth, tier.name, pedagogical)
 
                 # Visual metaphor library — pick the teaching metaphor(s) this prompt
                 # invites: a menu for the director (spine) + concrete Manim recipes for
@@ -617,12 +624,49 @@ async def _send_animation(
                         raw_sb = await generate_storyboard(
                             prompt, lessons=top_lessons, hard_constraints=hard_constraints,
                             depth=depth, metaphor_menu=metaphor_menu,
+                            pedagogical=pedagogical,
                         )
                         sb = parse_storyboard(raw_sb)
                         if sb:
                             issues = validate_storyboard(sb)
                             if issues:
                                 logger.info("Storyboard composition notes: %s", "; ".join(issues[:4]))
+
+                            # Pedagogical quality gate: for complex topics, verify the
+                            # storyboard carries the structural hallmarks of a well-taught
+                            # explainer. If not, regenerate ONCE with feedback.
+                            if pedagogical:
+                                from pedagogy import validate_pedagogical_storyboard
+                                ped_issues = validate_pedagogical_storyboard(sb)
+                                if ped_issues:
+                                    logger.info("Pedagogical storyboard missing: %s", "; ".join(ped_issues[:3]))
+                                    try:
+                                        note = (
+                                            "Your previous storyboard was missing key pedagogical elements: "
+                                            + "; ".join(ped_issues)
+                                            + ". Please include ALL of them in this attempt."
+                                        )
+                                        retry_constraints = (hard_constraints or []) + [note]
+                                        raw_sb2 = await generate_storyboard(
+                                            prompt, lessons=top_lessons,
+                                            hard_constraints=retry_constraints,
+                                            depth=depth, metaphor_menu=metaphor_menu,
+                                            pedagogical=True,
+                                        )
+                                        sb2 = parse_storyboard(raw_sb2)
+                                        if sb2:
+                                            ped_issues2 = validate_pedagogical_storyboard(sb2)
+                                            if len(ped_issues2) < len(ped_issues):
+                                                sb = sb2  # retry was better
+                                                logger.info("Pedagogical retry improved: %d → %d issues",
+                                                             len(ped_issues), len(ped_issues2))
+                                            else:
+                                                logger.info("Pedagogical retry did not improve — keeping first")
+                                        else:
+                                            logger.info("Pedagogical retry parse failed — keeping first")
+                                    except Exception as e:
+                                        logger.warning("Pedagogical retry failed (non-fatal): %s", e)
+
                             storyboard_text = format_storyboard_for_codegen(sb)
                             storyboard_obj = sb
                             logger.info(
@@ -672,6 +716,7 @@ async def _send_animation(
                             draft_quality=BEST_OF_N_DRAFT_QUALITY,
                             metaphor_menu=metaphor_menu,
                             metaphor_recipes=metaphor_recipes,
+                            storyboard_text=storyboard_text,
                         )
                         if winner:
                             code = winner
@@ -941,6 +986,7 @@ async def _send_animation(
                             sb = parse_storyboard(await generate_storyboard(
                                 prompt, lessons=top_lessons, hard_constraints=regen_constraints,
                                 depth=depth, metaphor_menu=metaphor_menu,
+                                pedagogical=pedagogical,
                             ))
                             if sb:
                                 storyboard_text = format_storyboard_for_codegen(sb)
@@ -1310,7 +1356,13 @@ async def _send_animation(
             if VISUAL_CRITIC_ENABLED and video_path and not task.is_cancelled():
                 for vpass in range(VISUAL_CRITIC_MAX_PASSES):
                     try:
-                        verdict = await critique_render(video_path, prompt, code)
+                        # Opt-in: the calibrated Aesthetic Director panel (far higher
+                        # precision) judges the frames inside this same loop; default
+                        # off → legacy single critic, unchanged behavior.
+                        if AESTHETIC_DIRECTOR_ENABLED:
+                            verdict = await critique_render_panel(video_path, prompt, code)
+                        else:
+                            verdict = await critique_render(video_path, prompt, code)
                     except Exception as e:
                         logger.warning(f"Visual critic error (non-fatal): {e}")
                         break

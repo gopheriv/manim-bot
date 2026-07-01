@@ -8,6 +8,8 @@ from pathlib import Path
 
 import imageio_ffmpeg
 
+from common import CREATE_NO_WINDOW
+
 logger = logging.getLogger(__name__)
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()

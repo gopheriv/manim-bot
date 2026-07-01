@@ -4,7 +4,6 @@ Guards the strength-based match_score: a template should fire only on a
 specific phrase or two keyword words — never on a single generic word, which
 must fall through to the LLM path.
 """
-import pytest
 
 from templates.base import SceneTemplate, TemplateConfig
 from templates.registry import get_registry, TemplateRegistry
@@ -89,6 +88,87 @@ def test_real_registry_still_matches_clear_topics():
     m = reg.match("animate a damped harmonic oscillator with phase space diagram")
     assert m is not None
     assert 0.0 <= m.confidence <= 1.0
+
+
+def test_unit_circle_trig_matches():
+    reg = get_registry()
+    m = reg.match("show the unit circle and how sine and cosine work")
+    assert m is not None and m.template.name == "Unit Circle Trig"
+    assert m.confidence >= 0.5
+
+
+def test_unit_circle_trig_matches_radians():
+    reg = get_registry()
+    m = reg.match("explain radians and trigonometric functions on the unit circle")
+    assert m is not None and m.template.name == "Unit Circle Trig"
+
+
+# ── New template match tests (curriculum coverage blitz) ──────────────────────
+
+def test_bar_chart_matches():
+    reg = get_registry()
+    m = reg.match("show a bar chart comparing sales across categories")
+    assert m is not None and m.template.name == "Bar Chart"
+
+
+def test_histogram_normal_matches():
+    reg = get_registry()
+    m = reg.match("histogram with a normal curve overlay")
+    assert m is not None and m.template.name == "Histogram Normal"
+
+
+def test_sine_cosine_waves_matches():
+    reg = get_registry()
+    m = reg.match("show sine and cosine waves with amplitude and period")
+    assert m is not None and m.template.name == "Sine Cosine Waves"
+
+
+def test_law_of_cosines_matches():
+    reg = get_registry()
+    m = reg.match("law of cosines triangle formula")
+    assert m is not None and m.template.name == "Law of Cosines"
+
+
+def test_completing_the_square_matches():
+    reg = get_registry()
+    m = reg.match("completing the square vertex form perfect square")
+    assert m is not None and m.template.name == "Completing the Square"
+
+
+def test_system_of_equations_matches():
+    reg = get_registry()
+    m = reg.match("system of equations two lines intersection point")
+    assert m is not None and m.template.name == "System of Equations"
+
+
+def test_inscribed_angle_theorem_matches():
+    reg = get_registry()
+    m = reg.match("inscribed angle theorem central angle circle")
+    assert m is not None and m.template.name == "Inscribed Angle Theorem"
+
+
+def test_similar_triangles_matches():
+    reg = get_registry()
+    m = reg.match("similar triangles ratio proportional sides")
+    assert m is not None and m.template.name == "Similar Triangles"
+
+
+def test_vector_projection_matches():
+    reg = get_registry()
+    m = reg.match("vector projection of a onto b")
+    assert m is not None and m.template.name == "Vector Projection"
+
+
+def test_sieve_of_eratosthenes_matches():
+    reg = get_registry()
+    m = reg.match("sieve of eratosthenes prime numbers cross out")
+    assert m is not None and m.template.name == "Sieve of Eratosthenes"
+
+
+def test_bubble_sort_matches():
+    reg = get_registry()
+    m = reg.match("bubble sort algorithm bars swapping")
+    assert m is not None and m.template.name == "Bubble Sort"
 
 
 def test_every_template_generates_compilable_code():

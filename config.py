@@ -188,6 +188,13 @@ VISUAL_CRITIC_KEYFRAMES = _getint("VISUAL_CRITIC_KEYFRAMES", 4)
 # Which provider scores rendered frames: "qwen" (default) or "claude".
 VISION_PROVIDER = _get("VISION_PROVIDER", "qwen").lower()
 
+# Aesthetic Director (opt-in): replace the single noisy visual critic with a
+# calibrated, spatially-grounded PANEL (framing/readability/contrast sub-critics +
+# a fusing director) that flags ONLY settled-frame defects — far higher precision
+# than the legacy critic. OFF by default so the legacy critic and all tests are
+# unchanged; when ON it judges the frames inside the existing visual-feedback loop.
+AESTHETIC_DIRECTOR_ENABLED = _getbool("AESTHETIC_DIRECTOR_ENABLED", False)
+
 # ── Cloud render farm (free GitHub Actions worker) ───────────────────────────
 # Heavy/HD/best-of-N renders are dispatched to a GitHub Actions workflow on a
 # (ideally public, for 16 GB/unlimited runners) worker repo, keeping the bot's

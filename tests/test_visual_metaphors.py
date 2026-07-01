@@ -55,6 +55,19 @@ def test_number_line_walk_matches_modular():
     assert "number_line_walk" in names
 
 
+def test_fourier_decomposition_matches_waveform():
+    names = [m.name for m in recommend_metaphors(
+        "show the Fourier decomposition of a complex waveform into harmonics")]
+    assert "fourier_decomposition" in names
+
+
+def test_fourier_matches_frequency_and_spectrum():
+    assert any(m.name == "fourier_decomposition" for m in recommend_metaphors(
+        "explain the frequency spectrum of a sound wave"))
+    assert any(m.name == "fourier_decomposition" for m in recommend_metaphors(
+        "decompose a signal into its harmonic components"))
+
+
 def test_unrelated_prompt_returns_empty():
     assert recommend_metaphors("paint a calm sunset landscape with warm colors") == []
 
@@ -116,6 +129,8 @@ def test_registry_entries_well_formed():
         names.add(m.name)
         assert m.concept and m.visual and m.why and m.recipe
         assert m.triggers and all(t == t.lower() for t in m.triggers)
+        # No duplicate triggers within an entry (catches copy-paste slips).
+        assert len(m.triggers) == len(set(m.triggers)), f"{m.name} has duplicate triggers"
 
 
 def test_recipes_have_no_placeholder_ellipsis():

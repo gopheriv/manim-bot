@@ -44,9 +44,9 @@ Output ONLY Python code. No explanation, no markdown fences.
 ## MANIM VERSION & API SAFETY (CRITICAL)
 - Target Manim Community Edition v{MANIM_VERSION}. Use ONLY methods, classes and
   keyword arguments that exist in this version — verify each one, do not invent.
-- These were REMOVED or RENAMED — NEVER use them (use the replacement):
+- These were REMOVED, RENAMED, or DEPRECATED — NEVER use them (use the replacement):
   `ShowCreation` → `Create`; `TextMobject`/`TexMobject` → `Text`/`Tex`/`MathTex`;
-  `get_graph` → `axes.plot`; `ApplyMethod(m.x())` → `m.animate.x()`;
+  `get_graph` → `axes.plot` (deprecated shim); `ApplyMethod(m.x())` → `m.animate.x()` (deprecated);
   `CONFIG = {{...}}` class dicts (pass args to `__init__` instead);
   `ShowCreationThenFadeOut`/`ShowCreationThenDestruction` → `ShowPassingFlash`.
 
@@ -66,6 +66,37 @@ Output ONLY Python code. No explanation, no markdown fences.
   `color_stops = [ManimColor(c) for c in ["#hex1", "#hex2", "#hex3"]]`.
 - `set_color("#hex")` and `fill_color="#hex"` accept strings — ONLY `interpolate_color`
   and friends need ManimColor. When in doubt, wrap with `ManimColor()`.
+
+## TOP RUNTIME BUGS — these crash the render most often
+- **self.play() needs Animations, not Mobjects**: `self.play(circle)` → TypeError.
+  Use `self.play(Create(circle))` or `self.play(FadeIn(circle))`.
+- **Axes coordinates**: `Dot([x, y, 0])` uses SCENE coords (may place dot off-graph).
+  Use `Dot(axes.c2p(x, y))` to convert axes coords to scene coords.
+- **Frame boundaries**: visible frame is 14.22 x 8.0 units. Objects with |x| > 7.1 or
+  |y| > 4.0 are invisible. Use `.to_edge()`, `.next_to(buff=0.3+)`, or `axes.c2p()`.
+- **Updater closure bug in loops**: `lambda m: m.move_to(obj)` captures `obj` by reference —
+  all lambdas see the LAST `obj`. Fix: `lambda m, o=obj: m.move_to(o)`.
+- **Never nest updaters**: `always_redraw` inside `always_redraw` = infinite recursion.
+- **Clear updaters when done**: call `.clear_updaters()` after the animation that needed them,
+  or the updater runs every remaining frame (slow render / hang).
+- **Empty VGroup**: `FadeOut(VGroup())` is a silent no-op. Check `len(group) > 0` first.
+- **Unescaped LaTeX special chars**: `%`, `&`, `#`, `_` in `Tex()`/`MathTex()` crash LaTeX.
+  Escape them (`\\%`, `\\&`, `\\#`). Use raw strings `r"..."` for LaTeX.
+  For non-math text (especially non-Latin), use `Text()` — it needs no LaTeX.
+
+## VERIFIED MANIMCE PATTERNS — known-good, use these directly
+- **Axes + plot**: `ax = Axes(x_range=[-3,3], y_range=[-1,9]); graph = ax.plot(lambda x: x**2, color=BLUE)`
+- **Graph coordinates**: `Dot(ax.c2p(x_val, y_val))` — NOT `Dot([x_val, y_val, 0])`
+- **ValueTracker + updater**: `t = ValueTracker(0); dot = always_redraw(lambda: Dot(ax.c2p(t.get_value(), f(t.get_value())))); self.play(t.animate.set_value(5), run_time=3); dot.clear_updaters()`
+- **Equation morph**: `self.play(TransformMatchingTex(eq1, eq2))` — shared terms travel visibly
+- **Colored equation terms**: `eq = MathTex(r"f(x)=x^2"); eq.set_color_by_tex("x^2", BLUE)`
+- **Area under curve**: `area = ax.get_area(graph, x_range=[a, b], color=YELLOW, fill_opacity=0.3)`
+- **Riemann rectangles**: `rects = ax.get_riemann_rectangles(graph, x_range=[a,b], dx=0.5); self.play(FadeIn(rects))`
+- **Camera push-in** (MovingCameraScene): `self.camera.frame.save_state(); self.play(self.camera.frame.animate.scale(0.3).move_to(target)); self.play(Restore(self.camera.frame))`
+- **Staggered reveal**: `self.play(LaggedStart(*[FadeIn(d, shift=UP*0.3) for d in dots], lag_ratio=0.15))`
+- **Glow copy**: `glow = obj.copy().set_stroke(width=12, opacity=0.15); self.add(glow)` — add, never Create alongside original
+- **Background behind text**: `BackgroundRectangle(text, buff=0.15, fill_opacity=0.7)`
+- **Grid transform** (linear algebra): `ghost = plane.copy().set_stroke(opacity=0.15); self.add(ghost); self.play(ApplyMatrix(matrix, plane))`
 
 ## VISUAL POLISH — avoid these specific defects (they look like bugs)
 - **Boxes must not clip their contents**: any `SurroundingRectangle`/`BackgroundRectangle`
@@ -380,9 +411,12 @@ _FIX_BUDGET_NOTE_CAPABLE = (
     "Preserve the original's layers and ambition — only fix what is broken."
 )
 
-LAYOUT_REPAIR_INTRO = """Layout validator found overlap/crowding:
+LAYOUT_REPAIR_INTRO = """Layout validator found issues:
 {issues}
-Fix ONLY positions, spacing, and timing. Preserve the concept and colors.
+Fix EXACTLY the issues listed above — adjust positions/spacing/timing AND correct
+any flagged API/name errors (e.g. ManimGL names, deprecated calls, a Mobject passed
+to self.play). Change NOTHING else: keep the same concept, colors, objects, and
+structure.
 """
 
 # ── Complexity assessment ────────────────────────────────────────────────────

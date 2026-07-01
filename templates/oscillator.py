@@ -109,7 +109,7 @@ axes.to_edge(DOWN)
 self.play(Create(axes, run_time=1))
 
 # Driving force
-force_curve = axes.plot(lambda t: math.sin(2 * math.pi * {freq} * t), x_range=[0, {dur - 0.1}], color="#F59E0B", stroke_width=2, opacity=0.6)
+force_curve = axes.plot(lambda t: math.sin(2 * math.pi * {freq} * t), x_range=[0, {dur - 0.1}], color="#F59E0B", stroke_width=2, stroke_opacity=0.6)
 self.play(Create(force_curve, run_time=2))
 
 force_label = MathTex(r"F(t) = F_0 \\sin(\\omega t)", font_size=28, color="#F59E0B")

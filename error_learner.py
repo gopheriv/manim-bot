@@ -40,9 +40,57 @@ def _load() -> list[dict]:
     if not ERROR_LOG_FILE.exists():
         return []
     try:
-        return json.loads(ERROR_LOG_FILE.read_text(encoding="utf-8"))
+        data = json.loads(ERROR_LOG_FILE.read_text(encoding="utf-8"))
+        # One-time migration: backfill signatures and re-categorize old entries
+        data = _migrate_legacy_entries(data)
+        return data
     except Exception:
         return []
+
+
+def _migrate_legacy_entries(data: list[dict]) -> list[dict]:
+    """Backfill missing signatures and re-categorize old entries.
+    
+    Entries logged before the dedup system was added lack a 'signature' field.
+    This migration computes signatures and re-categorizes them, then deduplicates
+    entries with the same signature. Runs once; after migration all entries have
+    signatures.
+    """
+    if not data:
+        return data
+    
+    # Check if any entries need migration
+    needs_migration = any("signature" not in entry for entry in data)
+    if not needs_migration:
+        return data
+    
+    logger.info("Migrating %d legacy error entries (backfilling signatures)", len(data))
+    
+    # Backfill signatures and re-categorize
+    for entry in data:
+        if "signature" not in entry:
+            error_msg = entry.get("error", "")
+            category = _categorize_error(error_msg)
+            entry["signature"] = _error_signature(category, error_msg)
+            entry["category"] = category
+    
+    # Deduplicate by signature (merge counts)
+    merged: dict[str, dict] = {}
+    for entry in data:
+        sig = entry.get("signature")
+        if sig in merged:
+            # Merge: add counts, keep newer timestamp
+            merged[sig]["count"] = merged[sig].get("count", 1) + entry.get("count", 1)
+            if entry.get("timestamp", "") > merged[sig].get("timestamp", ""):
+                merged[sig]["timestamp"] = entry["timestamp"]
+                merged[sig]["prompt_snippet"] = entry.get("prompt_snippet", "")[:100]
+                merged[sig]["code_snippet"] = entry.get("code_snippet", "")[:500]
+        else:
+            merged[sig] = entry.copy()
+    
+    result = list(merged.values())
+    logger.info("Migration complete: %d entries → %d unique signatures", len(data), len(result))
+    return result
 
 
 def _is_fresh(ts_str: str, cutoff: datetime, *, context: str = "error pattern") -> bool:
@@ -116,7 +164,7 @@ def _categorize_error(error: str) -> str:
         "type_error": [r"typeerror", r"cannot.*unpack"],
         "manim_api": [r"unexpected keyword", r"missing.*positional", r"got multiple values"],
         "render_timeout": [r"timed out", r"timeout"],
-        "memory_error": [r"memory", r"oom", r"out of memory"],
+        "memory_error": [r"memory", r"oom", r"out of memory", r"\bram\b", r"\bkilled\b"],
         "name_error": [r"nameerror"],
         "value_error": [r"valueerror"],
     }

@@ -1,0 +1,23 @@
+{
+  "_about": "Ground-truth visual-defect labels for the Aesthetic Director. Each scene = 5 keyframes under frames/<scene>/. Labels assigned by a human-equivalent reviewer (Claude Opus 4.8) who OPENED every settled frame — never a model score. 'defect' scenes are the recall floor: the judge must NEVER miss these. 'clean' scenes are where the OLD critic produced false alarms (normal full-frame curves, traced dots, translucent fills, colored arrows, sheared grids).",
+  "frame_count_per_scene": 5,
+  "settled_frame": "frame_05.jpg",
+  "scenes": [
+    {"scene": "scene08_latex_heavy", "source": "gauntlet", "label": "defect", "defect_type": "offframe", "defect_location": "top", "note": "parabola right arm exits the TOP frame edge (cropped curve) — verified by eye in frame_05"},
+    {"scene": "broken01_offframe", "source": "authored", "label": "defect", "defect_type": "offframe", "defect_location": "top_right", "note": "yellow circle cut off at top-right corner; 'result' label clipped to 'res' at right edge"},
+    {"scene": "broken02_overlap", "source": "authored", "label": "defect", "defect_type": "overlap", "defect_location": "center", "note": "two equations drawn at ORIGIN superimpose into illegible garbled glyphs"},
+    {"scene": "broken03_tinytext", "source": "authored", "label": "defect", "defect_type": "tiny_text", "defect_location": "center", "note": "body paragraph at font_size=8 — an unreadable micro-line under a readable title"},
+    {"scene": "broken04_samecolor", "source": "authored", "label": "defect", "defect_type": "low_contrast", "defect_location": "center", "note": "body text colour ~= background — present but unreadable ghost line under a readable title"},
+    {"scene": "broken05_origin_stack", "source": "authored", "label": "defect", "defect_type": "origin_stack", "defect_location": "center", "note": "circle + square + text all at ORIGIN pile into a muddy overlapping clump"},
+
+    {"scene": "scene01_function_plot", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "well-composed f(x)=x^2 parabola, arms reach top corners (NORMAL, not off-frame). Old-critic FALSE ALARM."},
+    {"scene": "scene02_equation_morph", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "single centered equation a^2+2ab+b^2; readable. Old-critic FALSE ALARM (likely 'dead space')."},
+    {"scene": "scene03_valuetracker_dot", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "parabola with a traced ValueTracker dot ending at the curve's top-right end (NORMAL). Old-critic FALSE ALARM."},
+    {"scene": "scene04_camera_pushin", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "parabola with labeled point (1,1); clean composition."},
+    {"scene": "scene05_true_3d", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "clean 3D paraboloid with axes; centered, readable."},
+    {"scene": "scene06_riemann_area", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "Riemann area; olive translucent fill is NORMAL integral shading, not a defect. Old-critic FALSE ALARM ('muddy fill')."},
+    {"scene": "scene07_grid_transform", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "sheared grid under a linear transform with white transformed axes (NORMAL). Old-critic FALSE ALARM."},
+    {"scene": "scene09_staggered_reveal", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "row of labeled dots 0-5; readable, mild dead space only."},
+    {"scene": "scene10_vectors", "source": "gauntlet", "label": "clean", "defect_type": null, "defect_location": null, "note": "two labeled vectors on a faint grid; clean, balanced. Old-critic FALSE ALARM (colored arrows / grid)."}
+  ]
+}

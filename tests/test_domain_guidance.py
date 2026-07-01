@@ -37,6 +37,14 @@ def test_chemistry_match():
     assert recommend_domain("show a reaction between two molecules forming bonds") == "chemistry"
 
 
+def test_geometry_match():
+    assert recommend_domain("prove the pythagorean theorem with squares on a right triangle") == "geometry"
+
+
+def test_number_theory_match():
+    assert recommend_domain("visualize prime numbers and divisibility") == "number_theory"
+
+
 def test_inflections_match_by_prefix():
     assert recommend_domain("explain differentiation rules") == "calculus"
     assert recommend_domain("a linear transformation of the plane") == "linear_algebra"
@@ -86,3 +94,12 @@ def test_registry_well_formed():
         assert d.triggers and d.guidance
         assert all(t == t.lower() for t in d.triggers)
         assert d.guidance.startswith("## DOMAIN")
+
+
+def test_no_duplicate_trigger_within_domain():
+    """Every domain must have unique triggers — no copy-paste duplicates."""
+    for d in _REGISTRY:
+        assert len(d.triggers) == len(set(d.triggers)), (
+            f"domain {d.name} has duplicate triggers: "
+            f"{[t for t in d.triggers if d.triggers.count(t) > 1]}"
+        )
